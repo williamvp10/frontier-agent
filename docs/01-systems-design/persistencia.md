@@ -134,3 +134,7 @@ Demo: consultar PostgreSQL para reconstruir interacciones; LangSmith sigue desha
 - [LangGraph: checkpointers y stores](https://docs.langchain.com/oss/python/langgraph/persistence).
 - [Memoria PostgreSQL en LangGraph](https://docs.langchain.com/oss/python/langgraph/add-memory).
 - [SQLAlchemy asíncrono y sesiones concurrentes](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html).
+
+## Especificación de implementación
+
+El modelo lógico anterior se concreta en [PostgreSQL](../02-ejecucion/specs/postgresql.md) y su [DDL de referencia](../02-ejecucion/specs/schema.sql), con sesiones, observaciones, acciones y credenciales cifradas además de las entidades iniciales. No es todavía una migración ejecutada.
