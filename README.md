@@ -112,6 +112,14 @@ python3 scripts/check_public_files.py
 
 Sin `TEST_DATABASE_URL`, `TEST_REDIS_URL` y `BOOTSTRAP_TEST_DATABASE_URI`, las pruebas que requieren esos servicios se omiten. Configurarlas sólo para PostgreSQL/Redis **desechables**: las fixtures limpian tablas y migran. CI proporciona servicios separados. Ver [evidencia de plataforma](docs/02-ejecucion/plataforma-implementada.md) y [despliegue](docs/02-ejecucion/despliegue.md).
 
+Para ejecutar la suite determinista completa con PostgreSQL/Redis desechables automáticamente (Docker Compose v2 y `uv`):
+
+```sh
+python3 scripts/test_with_services.py
+```
+
+El runner crea un proyecto aislado, inyecta las tres variables de test y limpia sus contenedores al terminar. Para Dokploy usar `infra/compose.yaml`: servicios `frontier-agent-*`, volúmenes persistentes por proyecto, bootstrap/grants automáticos y recursos configurables. Dominio HTTPS hacia **`frontier-agent-api:8000`**; comenzar con una API y un worker. Ver [presupuesto VPS, logins SQL y pasos de despliegue](docs/02-ejecucion/despliegue.md).
+
 Smoke de visión real con imagen sintética (usa el proveedor configurado y consume API):
 
 ```sh
@@ -128,18 +136,130 @@ Release exige E1–E5, HTTPS/readiness y cierre verificado. Worker demo combina 
 
 ### Evaluador de práctica CLI
 
-Selección y planificación sin red ni configuración privada:
+Ejecutar los comandos desde la raíz de `frontier-agent`. El evaluador usa las
+fixtures externas de `../frontier-reto-1/pruebas/`; no copiarlas al repositorio.
+Con `--fixtures "<carpeta externa>"` se puede indicar otra ubicación.
+
+#### 1. Validar el evaluador localmente, sin servicios ni escritorio
+
+```sh
+uv sync --frozen --extra dev --extra notebook
+.venv/bin/python -m pytest tests/unit/test_harness.py tests/unit/test_evaluator_cli.py -q
+```
+
+Estas pruebas usan HTTP simulado, reloj controlado y directorios temporales.
+Comprueban el flujo CLI, tokens separados, bloqueo/reinicio/reconciliación,
+reportes y canarios; no resetean ni operan el escritorio real.
+
+Validación del 10 de octubre de 2026: **58 pruebas del evaluador pasan**. Se corrigió
+el reporte con opciones por defecto (sin eventos/detalles), antes bloqueado por
+una comparación entre rutas `None`. `--list` y los dry-runs de 2 y 15 casos también
+se ejecutaron correctamente. Esto no acredita E1–E5 reales.
+
+#### 2. Listar y planificar sin red ni credenciales
 
 ```sh
 .venv/bin/python scripts/evaluate.py --list
 .venv/bin/python scripts/evaluate.py --cases E1,E3 --repetitions 1 --dry-run
+.venv/bin/python scripts/evaluate.py --all --repetitions 3 --dry-run
 ```
 
-El [evaluador](docs/02-ejecucion/evaluaciones.md) añade progreso, métricas diferenciadas,
-reportes privados incrementales y bloqueo persistente ante incertidumbre. La operación real
-requiere selección explícita, `--execute` y reserva coordinada declarada con
-`--exclusive-desktop`. Este corte se revisó estáticamente; tests y escritorio los valida
-el agente responsable de pruebas.
+El listado debe mostrar E1–E5. El primer dry-run planifica dos casos; el segundo,
+15. `--cases` respeta el orden indicado. Estos modos no cargan `.env`, no crean
+locks/reportes y no llaman al servicio. Selección desconocida/duplicada, catálogo
+inválido o repeticiones fuera de 1–10 terminan con error antes de ejecutar.
+
+#### 3. Preparar el entorno real de práctica
+
+API, PostgreSQL, Redis, worker y gateway/supervisor deben estar disponibles; el
+runner debe publicar terminal únicamente después de confirmar cierre del dueño
+VNC. Reservar el escritorio sin otros clientes/agentes antes de la prueba.
+`--exclusive-desktop` declara esa reserva: el lock local no detecta clientes externos.
+
+Completar **privadamente** `.env.vnc` con estas variables, sin poner tokens en
+argumentos shell ni en el README:
+
+| Variable | Uso |
+|---|---|
+| `TEAM_ENTRYPOINT_URL` | URL HTTPS de nuestra API, por ejemplo `https://agent.example` |
+| `TEAM_ENTRYPOINT_TOKEN` | Bearer de nuestra API: health, admisión y consulta |
+| `VNC_BASE_URL` | Origen HTTPS del control del escritorio de práctica |
+| `VNC_WS_URL` | URL WSS del mismo escritorio; host/puerto deben coincidir con VNC_BASE_URL |
+| `VNC_PASSWORD` | Contraseña del escritorio, enviada sólo a admisión |
+| `VNC_DESKTOP_TOKEN` | Bearer del harness de práctica para health/reset/check |
+
+El entorno del proceso prevalece sobre el archivo. Si los tokens están en otro
+archivo local, combinar la configuración privadamente antes de ejecutar; la CLI
+no carga automáticamente `.env` además de `.env.vnc`. `--entrypoint` permite
+sobrescribir la URL de API cuando sea necesario, sin cambiar la autoridad durante
+una operación pendiente.
+
+**Cada caso con `--execute` resetea el escritorio de práctica**, espera su health
+y estabilización, envía únicamente tarea/escritorio al agente, hace polling cada
+5 s y llama a `__check` con las expectativas desde el harness. Usarlo sólo contra
+práctica aislada. Las expectativas nunca se entregan al agente.
+
+#### 4. Ejecutar primero E3 y revisar su resultado
+
+```sh
+.venv/bin/python scripts/evaluate.py --env-file .env.vnc \
+  --cases E3 --repetitions 1 --execute --exclusive-desktop
+```
+
+La terminal muestra progreso y `PASS`, `FAIL`, `ERROR` o `SKIPPED`, sin instrucciones,
+respuestas de negocio ni credenciales. El reporte incremental queda en
+`.private/evaluaciones/latest.json`; una ejecución posterior archiva el anterior.
+Revisar `counts`, `reports[].checks`, `error_code` y las métricas de cada fase.
+
+- `PASS`: todos los oráculos pasan. E5 puede ser PASS con estado público `fallida`.
+- `FAIL`: hay terminal válido, pero un resultado/chequeo no coincide.
+- `ERROR`: infraestructura, protocolo o interrupción impidió evaluar.
+- `SKIPPED`: no se inició tras error/bloqueo/interrupción anterior.
+
+El tiempo de detección por polling no es el instante exacto de cierre. El reporte
+identifica `closure_basis=api_terminal_contract`; cierre físico/acciones tardías
+permanecen desconocidos sin evidencia adicional del gateway. Health del escritorio
+más espera tampoco prueba readiness visual. Un coste no obtenido queda `null`.
+
+#### 5. Ejecutar la suite completa tras aprobar el smoke y confirmar exclusividad
+
+```sh
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+.venv/bin/python scripts/evaluate.py --env-file .env.vnc \
+  --all --repetitions 3 --execute --exclusive-desktop \
+  --report ".private/evaluaciones/suite-$STAMP.json" \
+  --events ".private/evaluaciones/suite-$STAMP.events.jsonl"
+```
+
+La suite planifica 15 casos, por repetición y luego caso. JSON/JSONL se guardan
+privadamente con permisos 0600. Usar nombres nuevos para los eventos: un JSONL
+existente no se sobrescribe. `--private-details` es opcional y guarda instrucciones/
+resúmenes redactados en otro archivo privado; no publicarlo.
+
+Para correlacionar con Langfuse sin crear otra traza, añadir
+`--langfuse-env-file .env` con `LANGFUSE_BASE_URL` y `LANGFUSE_PROJECT_ID` configurados
+localmente. No requiere claves de trazado; `pending` no confirma ingestión ni coste.
+
+#### 6. Resolver una interrupción o bloqueo antes de volver a ejecutar
+
+Ctrl-C/SIGTERM detienen nuevos resets/admisiones y conservan el journal cuando
+hay incertidumbre. Cerrar el CLI no cancela la tarea remota. Reconciliar mediante
+lectura, con la misma API y el escritorio todavía reservado:
+
+```sh
+.venv/bin/python scripts/evaluate.py --env-file .env.vnc \
+  --reconcile --exclusive-desktop
+```
+
+Con task_id conocido, sólo un terminal válido de la misma autoridad limpia el
+bloqueo. `en_curso`, 404, error o API diferente lo conservan. Sin task_id conocido,
+el integrador debe reconciliar la admisión incierta y confirmar cierre del dueño;
+no borrar `.private/evaluaciones/state/` ni su clave para forzar otro reset.
+
+Códigos de salida: **0** éxito/listado/plan/reconciliación, **1** FAIL, **2** ERROR o
+configuración, **130** SIGINT y **143** SIGTERM. Las pruebas locales y el dry-run
+validan el evaluador; la suite E1–E5 real debe ejecutarse y revisarse por separado.
+Detalles adicionales: [evaluaciones](docs/02-ejecucion/evaluaciones.md).
 
 ## Configuración y privacidad
 

@@ -256,7 +256,7 @@ class ReportWriter:
         self.destination = private_path(destination)
         self.event_path = private_path(event_path) if event_path else None
         self.details_path = self.destination.with_suffix(".details.jsonl") if details else None
-        if self.event_path == self.destination or self.event_path == self.details_path:
+        if self.event_path is not None and self.event_path in {self.destination, self.details_path}:
             raise HarnessError("report_must_be_private")
         reserved = (ROOT / ".private/evaluaciones/state").resolve()
         if any(path.is_relative_to(reserved) for path in (
