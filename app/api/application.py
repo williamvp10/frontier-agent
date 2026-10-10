@@ -6,9 +6,10 @@ from datetime import UTC, datetime
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import text
@@ -93,12 +94,30 @@ def create_app(settings: Settings | None = None, *, repository=None, readiness=N
                 await engine.dispose()
 
     app = FastAPI(
-        title="Frontier Agent", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+        title="Frontier Agent",
+        description="API de ejecución de tareas sobre escritorios VNC. "
+        "Los endpoints requieren el token del equipo mediante Authorization: Bearer <token>.",
+        docs_url="/docs",
+        redoc_url=None,
+        openapi_url="/openapi.json",
+        swagger_ui_oauth2_redirect_url=None,
+        # Describe authentication in OpenAPI; middleware remains its authority.
+        dependencies=[Depends(HTTPBearer(
+            auto_error=False,
+            scheme_name="TeamBearer",
+            description="Token TEAM_ENTRYPOINT_TOKEN del equipo; introducir sólo el token.",
+        ))],
+        lifespan=lifespan,
     )
     app.state.repository, app.state.readiness = repository, readiness
 
     @app.middleware("http")
     async def auth_and_limits(request: Request, call_next):
+        # Exact documentation paths only; no prefix exemption for operational routes.
+        if request.method in {"GET", "HEAD"} and request.url.path in {
+            app.docs_url, app.openapi_url,
+        }:
+            return await call_next(request)
         header = request.headers.get("authorization", "")
         provided = header[7:] if header.startswith("Bearer ") else ""
         if not provided or not hmac.compare_digest(provided.encode(), token.encode()):
@@ -122,14 +141,16 @@ def create_app(settings: Settings | None = None, *, repository=None, readiness=N
         # Pydantic's default errors include raw inputs, URL and password.
         return JSONResponse({"detail": "Invalid request"}, status_code=422)
 
-    @app.get("/health")
+    @app.get("/health", tags=["Estado"], summary="Comprobar disponibilidad del sistema")
     async def health():
+        """Devuelve 200 cuando dependencias, memoria y heartbeats están listos; 503 si no."""
         if not await readiness():
             return JSONResponse({"ok": False}, status_code=503)
         return {"ok": True}
 
-    @app.post("/tasks", response_model=TaskAccepted)
+    @app.post("/tasks", response_model=TaskAccepted, tags=["Tareas"], summary="Crear una tarea")
     async def tasks(body: TaskRequest, request: Request):
+        """Acepta tarea y escritorio con persistencia durable; devuelve su UUID sin esperar VNC."""
         if not settings.allow_private_desktops:
             hostname = urlsplit(body.escritorio.url).hostname or ""
             if hostname.lower().rstrip(".") == "localhost":
@@ -161,8 +182,10 @@ def create_app(settings: Settings | None = None, *, repository=None, readiness=N
         except (SQLAlchemyError, RedisError, TimeoutError, OSError):
             return JSONResponse({"detail": "Task admission unavailable"}, status_code=503)
 
-    @app.get("/tasks/{task_id}", response_model=TaskResponse)
+    @app.get("/tasks/{task_id}", response_model=TaskResponse, tags=["Tareas"],
+             summary="Consultar estado y resumen de una tarea")
     async def task(task_id: UUID):
+        """Consulta una tarea del equipo autenticado; devuelve 404 si no existe para ese equipo."""
         try:
             async with asyncio.timeout(settings.admission_timeout_seconds):
                 result = await repository.get_for_team(task_id, settings.team_id)

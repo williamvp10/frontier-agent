@@ -46,14 +46,45 @@ async def client():
         ("post", "/tasks"),
         ("get", "/tasks/" + str(uuid4())),
         ("get", "/missing"),
+        ("get", "/docs/private"),
+        ("get", "/openapi.json/private"),
+        ("post", "/docs"),
+        ("post", "/openapi.json"),
+        ("get", "/redoc"),
     ],
 )
-async def test_c01_every_route_requires_bearer(client, method, path):
+async def test_c01_operational_and_non_documentation_routes_require_bearer(client, method, path):
     http, _ = client
     for headers in ({}, {"Authorization": "Bearer wrong"}):
         response = await getattr(http, method)(path, headers=headers)
         assert response.status_code == 401
         assert "wrong" not in response.text
+
+
+async def test_swagger_and_schema_are_public_but_operations_require_authorization(client):
+    http, repo = client
+    docs = await http.get("/docs")
+    assert docs.status_code == 200
+    assert "text/html" in docs.headers["content-type"]
+    assert "SwaggerUIBundle" in docs.text
+    assert "/openapi.json" in docs.text
+    response = await http.get("/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    assert set(schema["paths"]) == {"/health", "/tasks", "/tasks/{task_id}"}
+    bearer = schema["components"]["securitySchemes"]["TeamBearer"]
+    assert bearer["type"] == "http"
+    assert bearer["scheme"] == "bearer"
+    for path, method in (("/health", "get"), ("/tasks", "post"), ("/tasks/{task_id}", "get")):
+        assert schema["paths"][path][method]["security"] == [{"TeamBearer": []}]
+    assert "canary-bearer" not in response.text + docs.text
+    # Visiting public documentation does not authorize a subsequent operation.
+    assert (await http.get("/health")).status_code == 401
+    assert (await http.post("/tasks", json={})).status_code == 401
+    assert repo.tasks == {}
+    assert (await http.get("/health", headers={
+        "Authorization": "Bearer canary-bearer",
+    })).status_code == 200
 
 
 async def test_c02_body_validation_never_reflects_secrets(client):
