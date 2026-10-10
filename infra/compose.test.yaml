@@ -1,0 +1,40 @@
+# Sólo dependencias desechables. Sin .env, volúmenes persistentes ni red Dokploy.
+name: frontier-agent-test
+services:
+  frontier-agent-postgres-test:
+    image: postgres:16.13-bookworm
+    environment:
+      POSTGRES_USER: frontier_test
+      POSTGRES_DB: frontier_test
+      POSTGRES_PASSWORD: synthetic-test-password
+    tmpfs: ['/var/lib/postgresql/data:rw,nosuid,size=512m']
+    # Puerto aleatorio, publicado únicamente en loopback.
+    ports:
+      - target: 5432
+        host_ip: 127.0.0.1
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U frontier_test -d frontier_test']
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits: {cpus: '1.0', memory: 768M}
+  frontier-agent-redis-test:
+    image: redis:7.4.8-bookworm
+    command: [redis-server, --save, '', --appendonly, 'no']
+    tmpfs: ['/data:rw,nosuid,size=64m']
+    ports:
+      - target: 6379
+        host_ip: 127.0.0.1
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits: {cpus: '0.5', memory: 128M}
+networks:
+  # Bridge aislado por proyecto; necesita publicar loopback para pytest en el host.
+  default: {}

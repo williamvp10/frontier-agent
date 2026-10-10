@@ -1,3 +1,13 @@
+# Dokploy: origen Git, modo Docker Compose (no Stack). Dominio -> frontier-agent-api:8000.
+# Dokploy puede fijar -p; conservar ese nombre para reutilizar los volúmenes.
+name: frontier-agent
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-runtime: &runtime
   image: frontier-agent:${RELEASE_TAG:-local}
   build:
@@ -6,61 +16,91 @@ x-runtime: &runtime
   init: true
   restart: unless-stopped
   read_only: true
-  tmpfs: [/tmp]
+  tmpfs: ['/tmp:rw,noexec,nosuid,size=128m']
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   networks: [backend]
   stop_grace_period: 30s
+  logging: *logging
   depends_on:
-    postgres: {condition: service_healthy}
-    redis: {condition: service_healthy}
+    frontier-agent-postgres: {condition: service_healthy}
+    frontier-agent-redis: {condition: service_healthy}
+
+x-ready: &ready
+  frontier-agent-postgres: {condition: service_healthy}
+  frontier-agent-redis: {condition: service_healthy}
+  frontier-agent-bootstrap: {condition: service_completed_successfully}
 
 services:
-  postgres:
+  frontier-agent-postgres:
     image: postgres:16.13-bookworm
     restart: unless-stopped
     environment:
       POSTGRES_USER: frontier
       POSTGRES_DB: frontier
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set in Dokploy}
-    volumes: [postgres_data:/var/lib/postgresql/data]
+    volumes: [frontier_agent_pg:/var/lib/postgresql/data]
     networks: [backend]
+    logging: *logging
+    stop_grace_period: 60s
+    shm_size: 128m
     healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U frontier -d frontier']
+      test: [CMD-SHELL, 'PGPASSWORD="$$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "SELECT 1" >/dev/null']
       interval: 5s
       timeout: 3s
       retries: 10
-  redis:
+      start_period: 20s
+    deploy:
+      replicas: 1
+      resources:
+        limits: {cpus: '${POSTGRES_CPUS:-1.0}', memory: '${POSTGRES_MEMORY:-1G}'}
+        reservations: {cpus: '0.25', memory: 256M}
+  frontier-agent-redis:
     image: redis:7.4.8-bookworm
-    command: [redis-server, --appendonly, 'yes']
+    # No evictar referencias de tareas cuando la memoria se llena.
+    command: [redis-server, --appendonly, 'yes', --appendfsync, everysec, --maxmemory, '${REDIS_MAXMEMORY:-256mb}', --maxmemory-policy, noeviction]
     restart: unless-stopped
-    volumes: [redis_data:/data]
+    volumes: [frontier_agent_redis:/data]
     networks: [backend]
+    logging: *logging
+    stop_grace_period: 30s
     healthcheck:
       test: [CMD, redis-cli, ping]
       interval: 5s
       timeout: 3s
       retries: 10
-  bootstrap:
+    deploy:
+      replicas: 1
+      resources:
+        limits: {cpus: '${REDIS_CPUS:-0.5}', memory: '${REDIS_MEMORY:-512M}'}
+        reservations: {cpus: '0.1', memory: 128M}
+  frontier-agent-bootstrap:
     <<: *runtime
-    profiles: [bootstrap]
     restart: 'no'
-    command: [python, scripts/bootstrap.py]
+    # Job único por despliegue: runtime espera migraciones, memoria y grants.
+    command: [sh, -c, 'python scripts/bootstrap.py && python -m app.persistence.grants']
     environment:
       DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set migrator DSN}
       LANGGRAPH_DATABASE_URI: ${BOOTSTRAP_LANGGRAPH_DATABASE_URI:?Set native migrator DSN}
-      GRANTS_DATABASE_URL: ${GRANTS_DATABASE_URL:-}
-  api:
+      GRANTS_DATABASE_URL: ${GRANTS_DATABASE_URL:?Set administrative grants DSN}
+    deploy:
+      replicas: 1
+      resources:
+        limits: {cpus: '1.0', memory: 512M}
+        reservations: {cpus: '0.1', memory: 128M}
+  frontier-agent-api:
     <<: *runtime
     networks: [backend, ingress]
+    depends_on: *ready
     expose: ['8000']
     environment:
       TEAM_ID: ${TEAM_ID:-frontier}
       TEAM_ENTRYPOINT_TOKEN: ${TEAM_ENTRYPOINT_TOKEN:?Set team token}
       DATABASE_URL: ${API_DATABASE_URL:?Set API DSN}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://frontier-agent-redis:6379/0
       CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Set encryption key}
       DESTINATION_HMAC_KEY: ${DESTINATION_HMAC_KEY:?Set HMAC key}
+      ALLOW_PRIVATE_DESKTOPS: ${ALLOW_PRIVATE_DESKTOPS:-false}
       LANGSMITH_TRACING: 'false'
     healthcheck:
       test: [CMD, python, -c, 'import os,urllib.request; r=urllib.request.Request("http://127.0.0.1:8000/health",headers={"Authorization":"Bearer "+os.environ["TEAM_ENTRYPOINT_TOKEN"]}); urllib.request.urlopen(r,timeout=2).close()']
@@ -68,27 +108,39 @@ services:
       timeout: 3s
       retries: 6
       start_period: 30s
-  dispatcher:
+    deploy:
+      replicas: ${API_REPLICAS:-1}
+      resources:
+        limits: {cpus: '${API_CPUS:-0.5}', memory: '${API_MEMORY:-512M}'}
+        reservations: {cpus: '0.1', memory: 128M}
+  frontier-agent-dispatcher:
     <<: *runtime
     command: [python, -m, app.queue.main]
+    depends_on: *ready
     environment:
       DATABASE_URL: ${DISPATCHER_DATABASE_URL:?Set dispatcher DSN}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://frontier-agent-redis:6379/0
       LANGSMITH_TRACING: 'false'
-  worker:
+    deploy:
+      replicas: 1
+      resources:
+        limits: {cpus: '${DISPATCHER_CPUS:-0.25}', memory: '${DISPATCHER_MEMORY:-256M}'}
+        reservations: {cpus: '0.05', memory: 64M}
+  frontier-agent-worker:
     <<: *runtime
     command: [python, -m, app.worker.main]
+    depends_on: *ready
     # Egress required for model and supplied remote VNC; DB stays on internal backend.
     networks: [backend, egress]
-    volumes: [artifacts_data:/var/lib/frontier/artifacts]
+    volumes: [frontier_agent_artifacts:/var/lib/frontier/artifacts]
     environment:
       DATABASE_URL: ${WORKER_DATABASE_URL:?Set worker DSN}
       LANGGRAPH_DATABASE_URI: ${LANGGRAPH_DATABASE_URI:?Set native runtime DSN}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://frontier-agent-redis:6379/0
       CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Set encryption key}
       DESTINATION_HMAC_KEY: ${DESTINATION_HMAC_KEY:?Set HMAC key}
       MODEL_PROVIDER: ${MODEL_PROVIDER:-openrouter}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?Set OpenRouter key}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       MODEL_NAME: ${MODEL_NAME:-openai/gpt-6.1-sol}
       MODEL_COORDINATOR: ${MODEL_COORDINATOR:-openai/gpt-6-luna}
@@ -108,6 +160,7 @@ services:
       JEV_MAX_CALLS: ${JEV_MAX_CALLS:-4}
       MODEL_REASONING_EFFORT: ${MODEL_REASONING_EFFORT:-low}
       ARTIFACT_DIR: /var/lib/frontier/artifacts
+      ALLOW_PRIVATE_DESKTOPS: ${ALLOW_PRIVATE_DESKTOPS:-false}
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
@@ -115,11 +168,18 @@ services:
       LANGFUSE_TRACING_ENVIRONMENT: ${LANGFUSE_TRACING_ENVIRONMENT:-production}
       LANGSMITH_TRACING: 'false'
     stop_grace_period: 300s
+    deploy:
+      # Mantener 1 hasta aprobar exclusión global/crash/R05.
+      replicas: 1
+      resources:
+        limits: {cpus: '${WORKER_CPUS:-2.0}', memory: '${WORKER_MEMORY:-2G}'}
+        reservations: {cpus: '0.5', memory: 512M}
 
 volumes:
-  postgres_data:
-  redis_data:
-  artifacts_data:
+  # Sin name global: Compose/Dokploy añade el prefijo del proyecto.
+  frontier_agent_pg:
+  frontier_agent_redis:
+  frontier_agent_artifacts:
 networks:
   backend: {internal: true}
   egress: {}
