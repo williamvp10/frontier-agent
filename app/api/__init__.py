@@ -1,0 +1,1 @@
+"""Bearer-protected public entrypoint."""
