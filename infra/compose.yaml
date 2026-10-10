@@ -1,0 +1,128 @@
+x-runtime: &runtime
+  image: frontier-agent:${RELEASE_TAG:-local}
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  networks: [backend]
+  stop_grace_period: 30s
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
+services:
+  postgres:
+    image: postgres:16.13-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: frontier
+      POSTGRES_DB: frontier
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set in Dokploy}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U frontier -d frontier']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7.4.8-bookworm
+    command: [redis-server, --appendonly, 'yes']
+    restart: unless-stopped
+    volumes: [redis_data:/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  bootstrap:
+    <<: *runtime
+    profiles: [bootstrap]
+    restart: 'no'
+    command: [python, scripts/bootstrap.py]
+    environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set migrator DSN}
+      LANGGRAPH_DATABASE_URI: ${BOOTSTRAP_LANGGRAPH_DATABASE_URI:?Set native migrator DSN}
+      GRANTS_DATABASE_URL: ${GRANTS_DATABASE_URL:-}
+  api:
+    <<: *runtime
+    networks: [backend, ingress]
+    expose: ['8000']
+    environment:
+      TEAM_ID: ${TEAM_ID:-frontier}
+      TEAM_ENTRYPOINT_TOKEN: ${TEAM_ENTRYPOINT_TOKEN:?Set team token}
+      DATABASE_URL: ${API_DATABASE_URL:?Set API DSN}
+      REDIS_URL: redis://redis:6379/0
+      CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Set encryption key}
+      DESTINATION_HMAC_KEY: ${DESTINATION_HMAC_KEY:?Set HMAC key}
+      LANGSMITH_TRACING: 'false'
+    healthcheck:
+      test: [CMD, python, -c, 'import os,urllib.request; r=urllib.request.Request("http://127.0.0.1:8000/health",headers={"Authorization":"Bearer "+os.environ["TEAM_ENTRYPOINT_TOKEN"]}); urllib.request.urlopen(r,timeout=2).close()']
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+  dispatcher:
+    <<: *runtime
+    command: [python, -m, app.queue.main]
+    environment:
+      DATABASE_URL: ${DISPATCHER_DATABASE_URL:?Set dispatcher DSN}
+      REDIS_URL: redis://redis:6379/0
+      LANGSMITH_TRACING: 'false'
+  worker:
+    <<: *runtime
+    command: [python, -m, app.worker.main]
+    # Egress required for model and supplied remote VNC; DB stays on internal backend.
+    networks: [backend, egress]
+    volumes: [artifacts_data:/var/lib/frontier/artifacts]
+    environment:
+      DATABASE_URL: ${WORKER_DATABASE_URL:?Set worker DSN}
+      LANGGRAPH_DATABASE_URI: ${LANGGRAPH_DATABASE_URI:?Set native runtime DSN}
+      REDIS_URL: redis://redis:6379/0
+      CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Set encryption key}
+      DESTINATION_HMAC_KEY: ${DESTINATION_HMAC_KEY:?Set HMAC key}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-openrouter}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      MODEL_NAME: ${MODEL_NAME:-openai/gpt-6.1-sol}
+      MODEL_COORDINATOR: ${MODEL_COORDINATOR:-openai/gpt-6-luna}
+      MODEL_OPERATOR: ${MODEL_OPERATOR:-openai/gpt-6-luna}
+      MODEL_VERIFIER: ${MODEL_VERIFIER:-anthropic/claude-sonnet-5.5}
+      MODEL_RECOVERY: ${MODEL_RECOVERY:-openai/gpt-6.1-sol}
+      MODEL_ANALYST: ${MODEL_ANALYST:-openai/gpt-6-luna}
+      MODEL_JEV: ${MODEL_JEV:-typesafe/jev-1.13}
+      MODEL_PROFILES: ${MODEL_PROFILES:-null}
+      GRAPH_VERSION: ${GRAPH_VERSION:-context-v2}
+      OPENROUTER_JEV_ENDPOINT: ${OPENROUTER_JEV_ENDPOINT:-/api/alpha/decisions}
+      OPENROUTER_PROVIDER_SORT: ${OPENROUTER_PROVIDER_SORT:-latency}
+      OPENROUTER_REQUIRE_PARAMETERS: ${OPENROUTER_REQUIRE_PARAMETERS:-true}
+      OPENROUTER_ALLOW_FALLBACKS: ${OPENROUTER_ALLOW_FALLBACKS:-false}
+      JEV_ENABLED: ${JEV_ENABLED:-false}
+      JEV_TIMEOUT_SECONDS: ${JEV_TIMEOUT_SECONDS:-3}
+      JEV_MAX_CALLS: ${JEV_MAX_CALLS:-4}
+      MODEL_REASONING_EFFORT: ${MODEL_REASONING_EFFORT:-low}
+      ARTIFACT_DIR: /var/lib/frontier/artifacts
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-https://us.cloud.langfuse.com}
+      LANGFUSE_TRACING_ENVIRONMENT: ${LANGFUSE_TRACING_ENVIRONMENT:-production}
+      LANGSMITH_TRACING: 'false'
+    stop_grace_period: 300s
+
+volumes:
+  postgres_data:
+  redis_data:
+  artifacts_data:
+networks:
+  backend: {internal: true}
+  egress: {}
+  ingress:
+    external: true
+    name: ${DOKPLOY_NETWORK:-dokploy-network}

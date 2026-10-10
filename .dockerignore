@@ -1,0 +1,14 @@
+*
+!pyproject.toml
+!uv.lock
+!app/
+!app/**
+!migrations/
+!migrations/**
+!alembic.ini
+!scripts/
+!scripts/bootstrap.py
+!infra/
+!infra/Dockerfile
+**/__pycache__/
+**/*.pyc

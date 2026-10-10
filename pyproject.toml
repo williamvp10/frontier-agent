@@ -1,0 +1,44 @@
+[project]
+name = "frontier-agent"
+version = "0.1.0"
+description = "Multiagent visual desktop operator over VNC"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "psycopg[binary,pool]>=3.2,<4",
+  "alembic>=1.14,<2",
+  "redis>=5,<7",
+  "cryptography>=44,<48",
+  "langgraph>=1,<2",
+  "langchain>=1,<2",
+  "langchain-openai>=1,<2",
+  "langgraph-checkpoint-postgres>=3,<4",
+  "asyncvnc==1.3.0",
+  "websockets>=14,<16",
+  "pillow>=11,<13",
+  "numpy>=2,<3",
+  "httpx>=0.28,<1",
+  "langfuse>=4,<5",
+]
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1"]
+notebook = ["ipykernel>=6,<8", "nbclient>=0.10,<1", "nbformat>=5,<6", "python-dotenv>=1,<2"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["unit: deterministic logic", "contract: API contract", "integration: real dependencies", "e2e: visual end-to-end", "release: deployed smoke"]
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

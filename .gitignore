@@ -1,0 +1,46 @@
+# Credenciales y configuración privada
+.env
+.env.*
+!.env.example
+.private/
+*.pem
+*.key
+
+# Evidencias de ejecución y datos del escritorio
+artifacts/
+downloads/
+logs/
+screenshots/
+traces/
+videos/
+.playwright-cli/
+*.log
+*.har
+*.sqlite
+*.sqlite3
+*.db
+
+# Python y herramientas locales
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Sistema y dependencias
+.DS_Store
+node_modules/
+
+
+# Archivos intermedios de LaTeX
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
