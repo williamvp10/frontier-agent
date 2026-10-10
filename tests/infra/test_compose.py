@@ -16,6 +16,10 @@ def test_compose_has_isolated_secret_roles_and_replica_safe_config():
         pytest.skip("Docker Compose CLI is unavailable")
     source = Path("infra/compose.yaml").read_text()
     names = re.findall(r"\$\{([A-Z_]+):\?", source)
+    assert set(names) == {
+        "POSTGRES_PASSWORD", "TEAM_ENTRYPOINT_TOKEN", "CREDENTIALS_ENCRYPTION_KEY",
+        "DESTINATION_HMAC_KEY", "OPENROUTER_API_KEY",
+    }
     env = {"PATH": os.environ["PATH"], **dict.fromkeys(names, "synthetic-test-value")}
     completed = subprocess.run(
         [
@@ -59,6 +63,12 @@ def test_compose_has_isolated_secret_roles_and_replica_safe_config():
     assert services["worker"]["read_only"]
     # Prevent startup before schema/grants readiness, including every API replica.
     for name in ("api", "dispatcher", "worker"):
+        assert "POSTGRES_PASSWORD" not in services[name]["environment"]
+        connections = [v for v in services[name]["volumes"] if "connections" in v["target"]]
+        assert len(connections) == 1
+        assert connections[0]["read_only"]
+        assert connections[0]["target"].endswith("/" + name)
+        assert services[name]["environment"]["DATABASE_URL"] == ""
         assert services[name]["depends_on"]["frontier-agent-bootstrap"]["condition"] == (
             "service_completed_successfully"
         )

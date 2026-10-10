@@ -17,7 +17,11 @@ COPY app ./app
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY scripts/bootstrap.py ./scripts/bootstrap.py
-RUN mkdir -p /var/lib/frontier/artifacts && chown -R 10001:10001 /var/lib/frontier
+RUN chmod -R a+rX /opt/frontier/app /opt/frontier/migrations /opt/frontier/scripts \
+    && mkdir -p /var/lib/frontier/artifacts \
+    && mkdir -p /var/lib/frontier/connections/api /var/lib/frontier/connections/dispatcher /var/lib/frontier/connections/worker \
+    && chmod 700 /var/lib/frontier/connections/* \
+    && chown -R 10001:10001 /var/lib/frontier
 ENV PATH="/opt/frontier/.venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER 10001:10001
 EXPOSE 8000

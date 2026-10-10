@@ -13,6 +13,7 @@ x-runtime: &runtime
   build:
     context: ..
     dockerfile: infra/Dockerfile
+  entrypoint: [python, -m, app.persistence.compose_runtime]
   init: true
   restart: unless-stopped
   read_only: true
@@ -78,11 +79,16 @@ services:
     <<: *runtime
     restart: 'no'
     # Job único por despliegue: runtime espera migraciones, memoria y grants.
-    command: [sh, -c, 'python scripts/bootstrap.py && python -m app.persistence.grants']
+    command: [bootstrap]
+    volumes:
+      - frontier_agent_api_connection:/var/lib/frontier/connections/api
+      - frontier_agent_dispatcher_connection:/var/lib/frontier/connections/dispatcher
+      - frontier_agent_worker_connection:/var/lib/frontier/connections/worker
     environment:
-      DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set migrator DSN}
-      LANGGRAPH_DATABASE_URI: ${BOOTSTRAP_LANGGRAPH_DATABASE_URI:?Set native migrator DSN}
-      GRANTS_DATABASE_URL: ${GRANTS_DATABASE_URL:?Set administrative grants DSN}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set in Dokploy}
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
+      LANGGRAPH_DATABASE_URI: ${BOOTSTRAP_LANGGRAPH_DATABASE_URI:-}
+      GRANTS_DATABASE_URL: ${GRANTS_DATABASE_URL:-}
     deploy:
       replicas: 1
       resources:
@@ -90,13 +96,16 @@ services:
         reservations: {cpus: '0.1', memory: 128M}
   frontier-agent-api:
     <<: *runtime
+    command: [uvicorn, 'app.api.main:app', --host, '0.0.0.0', --port, '8000', --no-access-log]
     networks: [backend, ingress]
     depends_on: *ready
     expose: ['8000']
+    volumes: [frontier_agent_api_connection:/var/lib/frontier/connections/api:ro]
     environment:
       TEAM_ID: ${TEAM_ID:-frontier}
       TEAM_ENTRYPOINT_TOKEN: ${TEAM_ENTRYPOINT_TOKEN:?Set team token}
-      DATABASE_URL: ${API_DATABASE_URL:?Set API DSN}
+      FRONTIER_SERVICE_ROLE: api
+      DATABASE_URL: ${API_DATABASE_URL:-}
       REDIS_URL: redis://frontier-agent-redis:6379/0
       CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Set encryption key}
       DESTINATION_HMAC_KEY: ${DESTINATION_HMAC_KEY:?Set HMAC key}
@@ -116,9 +125,11 @@ services:
   frontier-agent-dispatcher:
     <<: *runtime
     command: [python, -m, app.queue.main]
+    volumes: [frontier_agent_dispatcher_connection:/var/lib/frontier/connections/dispatcher:ro]
     depends_on: *ready
     environment:
-      DATABASE_URL: ${DISPATCHER_DATABASE_URL:?Set dispatcher DSN}
+      FRONTIER_SERVICE_ROLE: dispatcher
+      DATABASE_URL: ${DISPATCHER_DATABASE_URL:-}
       REDIS_URL: redis://frontier-agent-redis:6379/0
       LANGSMITH_TRACING: 'false'
     deploy:
@@ -132,10 +143,13 @@ services:
     depends_on: *ready
     # Egress required for model and supplied remote VNC; DB stays on internal backend.
     networks: [backend, egress]
-    volumes: [frontier_agent_artifacts:/var/lib/frontier/artifacts]
+    volumes:
+      - frontier_agent_artifacts:/var/lib/frontier/artifacts
+      - frontier_agent_worker_connection:/var/lib/frontier/connections/worker:ro
     environment:
-      DATABASE_URL: ${WORKER_DATABASE_URL:?Set worker DSN}
-      LANGGRAPH_DATABASE_URI: ${LANGGRAPH_DATABASE_URI:?Set native runtime DSN}
+      FRONTIER_SERVICE_ROLE: worker
+      DATABASE_URL: ${WORKER_DATABASE_URL:-}
+      LANGGRAPH_DATABASE_URI: ${LANGGRAPH_DATABASE_URI:-}
       REDIS_URL: redis://frontier-agent-redis:6379/0
       CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Set encryption key}
       DESTINATION_HMAC_KEY: ${DESTINATION_HMAC_KEY:?Set HMAC key}
@@ -159,6 +173,8 @@ services:
       JEV_TIMEOUT_SECONDS: ${JEV_TIMEOUT_SECONDS:-3}
       JEV_MAX_CALLS: ${JEV_MAX_CALLS:-4}
       MODEL_REASONING_EFFORT: ${MODEL_REASONING_EFFORT:-low}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-20}
+      ACTION_PROPOSAL_TTL_SECONDS: ${ACTION_PROPOSAL_TTL_SECONDS:-30}
       ARTIFACT_DIR: /var/lib/frontier/artifacts
       ALLOW_PRIVATE_DESKTOPS: ${ALLOW_PRIVATE_DESKTOPS:-false}
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
@@ -180,6 +196,9 @@ volumes:
   frontier_agent_pg:
   frontier_agent_redis:
   frontier_agent_artifacts:
+  frontier_agent_api_connection:
+  frontier_agent_dispatcher_connection:
+  frontier_agent_worker_connection:
 networks:
   backend: {internal: true}
   egress: {}
