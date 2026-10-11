@@ -1,0 +1,78 @@
+{
+  "version": "0.4",
+  "total_seconds": 180,
+  "main_slides": 7,
+  "backup_slides": 2,
+  "status": "Resultados documentados; producción objetivo",
+  "slides": [
+    {
+      "title": "El problema · Frontier Agent",
+      "seconds": 20,
+      "headline": "Una tarea simple puede exigir\nmuchas pantallas.",
+      "body": "Consultar, editar o exportar sin una API.\nLa persona debe encontrar y comprobar el recorrido.",
+      "notes": "0:00–0:20. Somos Frontier Agent. Abordamos la operación manual de apps sin API: consultar, editar o exportar exige recorrer pantallas y verificar el resultado. Usuario inicial propuesto: operación comercial. Fuente: docs/requisitos-reto-1.md."
+    },
+    {
+      "title": "El impacto · tiempo y herramientas",
+      "seconds": 15,
+      "stats": [
+        {
+          "value": "60%",
+          "label": "del tiempo de los representantes\nde ventas se dedica a actividades\ndistintas de vender."
+        },
+        {
+          "value": "42%",
+          "label": "de los representantes de ventas\nse siente abrumado por la\ncantidad de herramientas."
+        }
+      ],
+      "aside": "Contexto del problema; no equivale a tiempo recuperable.",
+      "notes": "0:20–0:35. Salesforce reporta que los representantes de ventas dedican el 60% del tiempo a actividades distintas de vender, y el 42% se siente abrumado por la cantidad de herramientas. Estos datos muestran una fricción real en ese segmento. No todo ese tiempo es automatizable ni hemos medido cuánto ahorra nuestro agente. Fuente: Salesforce, State of Sales 7.ª edición, 2026, páginas 8 y 16; metodología página 3. Encuesta anónima a 4.050 profesionales de ventas en 22 países, agosto–septiembre de 2025; las cifras se refieren a representantes de ventas y el total es la muestra del informe, no el N exacto de cada pregunta. https://www.salesforce.com/en/wp-content/uploads/sites/4/documents/reports/sales/salesforce-state-of-sales-report-2026.pdf"
+    },
+    {
+      "title": "La solución",
+      "seconds": 20,
+      "headline": "Tú defines la tarea.\nEl agente decide el recorrido.",
+      "body": "Observa → Decide → Actúa → Verifica",
+      "aside": "El plan se ajusta a la pantalla; las acciones tienen límites.",
+      "notes": "0:35–0:55. Frontier Agent recibe una instrucción, observa la app, decide cómo avanzar y verifica. Reobserva ante bloqueos y no amplía el alcance. Adaptación universal aún no demostrada. Fuentes: app/agents/graph_v2.py y docs/02-ejecucion/mejora-navegacion-visual.md."
+    },
+    {
+      "title": "Arquitectura multiagente",
+      "seconds": 25,
+      "kind": "agents",
+      "notes": "0:55–1:20. Coordinator planifica; Operator propone; Verifier verifica efecto y completitud; Recovery trata bloqueos. Son roles dentro de un StateGraph y runtime, no cuatro procesos autónomos. Sólo un gateway VNC emite acciones; el runner confirma cierre. Jev es consejo opcional y está apagado. Vista resumida fiel a la implementación; original completo en respaldo. Fuentes: docs/02-ejecucion/auditoria-arquitectura-e3.md, mejora-navegacion-visual.md y docs/01-systems-design/arquitectura-multiagente.mmd."
+    },
+    {
+      "title": "Arquitectura de producción",
+      "seconds": 25,
+      "kind": "production",
+      "notes": "1:20–1:45. Diseño objetivo: API admite tareas, PostgreSQL conserva autoridad y outbox, Redis transporta referencias, worker corre el grafo y gateway opera VNC. Supervisor controla plazo/cierre. Langfuse exporta metadatos seguros y capturas quedan privadas. Réplicas por escritorios independientes; workers múltiples, recuperación tras crash y despliegue público siguen sin aceptación final. El diseño aprobado original menciona LangSmith: implementación vigente usa Langfuse y LangSmith apagado. Fuentes: docs/01-systems-design/arquitectura-produccion.mmd, AGENTS.md y docs/02-ejecucion/mejora-navegacion-visual.md."
+    },
+    {
+      "title": "Resultados reales · corte local",
+      "seconds": 40,
+      "kind": "results",
+      "notes": "1:45–2:25. La ejecución posterior E3 pasó 1/1 con prompts v2.7. Admisión 0,03 s; terminal detectado por polling a 196,3 s, no instante exacto de cierre. Diez acciones verificadas y cierre de transporte/dueño confirmados en PostgreSQL. Suite completa documentada: 340 pruebas con DB/Redis desechables; no 340 tareas reales. Hubo E3 fallidos previos, luego correcciones y un PASS; no tasa histórica 100%. Sin nuevas pruebas al preparar esta presentación. E1–E5 completos, estabilidad y app desconocida pendientes. Fuente: docs/02-ejecucion/mejora-navegacion-visual.md y specs/planning.md."
+    },
+    {
+      "title": "Lo aprendido y lo mejorado",
+      "seconds": 35,
+      "kind": "learning",
+      "notes": "2:25–3:00. Aprendimos que confirmar un efecto y completar la tarea son evaluaciones distintas: invalid_reconciliation ocurría con efecto aplicado pero reporte global incompleto. Se separó effect_status/effect_facts, se registran criterios parciales y se pide verificación final. Mejoramos navegación con rutas confirmadas por run, evidencia posterior ligada a la acción y captura fresca tras planificación lenta. Recuperación no repite a ciegas. El siguiente gate es completar E1–E5 con repeticiones y probar variaciones reales. Fuente: docs/02-ejecucion/auditoria-arquitectura-e3.md y mejora-navegacion-visual.md."
+    },
+    {
+      "title": "Respaldo · grafo completo",
+      "seconds": 0,
+      "kind": "image",
+      "image": "arquitectura-multiagente",
+      "notes": "Diagrama original aprobado, diseño propuesto v0.3. Respaldo para preguntas; no recorrer durante los tres minutos. Fuente: docs/01-systems-design/arquitectura/arquitectura-multiagente.png. No es traza de ejecución."
+    },
+    {
+      "title": "Respaldo · producción completa",
+      "seconds": 0,
+      "kind": "image",
+      "image": "arquitectura-produccion",
+      "notes": "Diagrama original aprobado, diseño objetivo v0.3. Respaldo para preguntas. LangSmith en el original; implementación actual usa Langfuse, LangSmith deshabilitado. Infraestructura objetivo no es despliegue confirmado. Fuente: docs/01-systems-design/arquitectura/arquitectura-produccion.png."
+    }
+  ]
+}

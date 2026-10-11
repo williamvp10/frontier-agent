@@ -1,0 +1,59 @@
+{
+  "version": "base-0.2",
+  "status": "En desarrollo; conclusiones pendientes",
+  "total_seconds": 300,
+  "slides": [
+    {
+      "title": "Frontier Agent",
+      "seconds": 25,
+      "headline": "Un agente que decide\ncómo operar una app nueva",
+      "body": "Recibe un objetivo en lenguaje natural.\nObserva la interfaz y elige cómo avanzar.",
+      "notes": "0:00–0:25. Somos [equipo]. El agente recibe un objetivo y toma decisiones a partir de la pantalla. La ambición es resolver distintas tareas en apps nuevas mediante teclado y ratón vía VNC. Proyecto en desarrollo. Fuente: README.md y AGENTS.md."
+    },
+    {
+      "title": "Distintas tareas, una misma capacidad",
+      "seconds": 40,
+      "headline": "El usuario define el objetivo.\nEl agente decide el recorrido.",
+      "body": "Consultar información\nCrear o editar un registro\nFiltrar y exportar resultados",
+      "aside": "Nuestra meta: resolver cualquier tarea permitida\ny realizable desde la interfaz.",
+      "notes": "0:25–1:05. Estos son tipos de tareas objetivo del reto, no capacidades ya aprobadas. Queremos un agente general que decida el recorrido dentro de una aplicación nueva, sujeto a permisos, alcance y controles accesibles. No afirmar éxito universal ni que todos estos flujos ya funcionan. Fuentes: docs/requisitos-reto-1.md y AGENTS.md."
+    },
+    {
+      "title": "Decisiones basadas en lo que ve",
+      "seconds": 50,
+      "steps": [
+        "OBSERVAR",
+        "PLANIFICAR",
+        "ACTUAR",
+        "VERIFICAR"
+      ],
+      "body": "Identifica qué hay en pantalla y qué falta para el objetivo.\nElige el siguiente paso y comprueba su efecto.\nSi aparece un bloqueo, reobserva y ajusta el plan.",
+      "aside": "Si la identidad es ambigua, se detiene antes de modificar.",
+      "notes": "1:05–1:55. Coordinador: hitos; operador: propuesta desde pantalla; verificador: evidencia; recovery: bloqueo dentro del alcance. Gateway único ejecuta. La autonomía está en elegir el recorrido, no en ampliar la instrucción. La verificación usa evidencias, y el runner confirma cierre. Integración no equivale a aceptación de negocio. Fuentes: app/agents/graph_v2.py, app/worker/runner.py y docs/02-ejecucion/integracion-openrouter-v2.md."
+    },
+    {
+      "title": "Adaptación en una app nueva",
+      "seconds": 100,
+      "headline": "La interfaz puede cambiar.\nEl objetivo sigue guiando al agente.",
+      "body": "Reconocer los controles disponibles\nElegir un recorrido según la pantalla actual\nComprobar el resultado y corregir el siguiente paso",
+      "aside": "DEMO · [tarea validada] → [resultado observable]",
+      "notes": "1:55–3:35. Aquí se muestra la demo real. 15 s: instrucción y pantalla inicial; 55 s: recorrido; 30 s: evidencia final y chequeo externo. Completar con una ejecución validada. Si se dispone de una variación real de UI, mostrar qué observó y cómo cambió de acción; si no, describir la adaptación como diseño, sin inventar una demostración. No usar coordenadas memorizadas. Si supera el tiempo, usar grabación de ejecución real identificada como tal. Mostrar fallos y abstención cuando ocurran. Expectativas del harness fuera del agente. Fuentes: docs/02-ejecucion/evaluaciones.md y AGENTS.md."
+    },
+    {
+      "title": "Qué vamos a demostrar",
+      "seconds": 60,
+      "headline": "La evidencia estará\nen el resultado de la app.",
+      "body": "Resultado de la suite     [PASS / FAIL / ERROR / SKIPPED]\nTiempo y muestra          [duración / N ejecuciones]\nFallo observado             [síntoma / causa / límite]",
+      "aside": "Resultados finales pendientes de la evaluación.",
+      "notes": "3:35–4:35. Sustituir por números de la suite final con denominadores y distinguir sintético/práctica/app desconocida. La consulta real sólo lectura documentada con cero acciones y cierre confirmado no prueba tareas de negocio. Abstención segura puede ser PASS. No presentar metas como resultados. Fuente: docs/02-ejecucion/integracion-openrouter-v2.md y evaluaciones.md."
+    },
+    {
+      "title": "El objetivo: operar apps nuevas",
+      "seconds": 25,
+      "headline": "Que una nueva interfaz\nno obligue a programar\nun nuevo recorrido.",
+      "body": "Una instrucción para expresar la tarea.\nDecisiones para encontrar cómo resolverla.",
+      "aside": "Al cierre: capacidad demostrada, límites y siguiente mejora.",
+      "notes": "4:35–5:00. Este cierre expresa la ambición del sistema, no generalidad ya probada. Al terminar el reto se incorporará una conclusión basada en evidencia: tareas realizadas, condiciones, fallos y siguiente prioridad. No afirmar que puede hacer cualquier cosa en toda app."
+    }
+  ]
+}

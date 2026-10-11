@@ -9,10 +9,11 @@ from typing import Protocol, TypeVar
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langsmith import tracing_context
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.core.observability import observed, record_usage
 from app.models.prompts import live_prompt
+from app.models.schemas import ModelOutputRejected
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -56,7 +57,7 @@ class OpenAIVisualModel:
             result = await structured.ainvoke(messages, config={"callbacks": []})
         if isinstance(result, dict) and "parsed" in result:
             if result.get("parsing_error") or result["parsed"] is None:
-                raise ValueError("Invalid structured model output")
+                raise ModelOutputRejected("Invalid structured model output")
             raw = result["raw"]
             usage = getattr(raw, "usage_metadata", None) or {}
             meta = {"duration_seconds": time.monotonic() - started}
@@ -76,4 +77,7 @@ class OpenAIVisualModel:
             self.last_metadata = meta
             record_usage(meta, model=meta.get("resolved_model", getattr(self.client, "model_name", None)))
             result = result["parsed"]
-        return result if isinstance(result, schema) else schema.model_validate(result)
+        try:
+            return result if isinstance(result, schema) else schema.model_validate(result)
+        except ValidationError:
+            raise ModelOutputRejected("Invalid structured model output") from None

@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import Field
 
 from app.agents.context import (
+    BoundingBox,
     ContextModel,
     Fact,
     FactUpdate,
@@ -17,7 +18,6 @@ from app.agents.context import (
     TaskContract,
     TransitionEdge,
     ViewNode,
-    VisibleControl,
 )
 from app.models.advice import AdviceQuestion
 from app.models.schemas import ModelAction, VisualVerification
@@ -54,6 +54,17 @@ class VerifierPatch(ContextModel):
     fact_updates: tuple[FactUpdate, ...] = Field(default=(), max_length=20)
 
 
+class UIControlProposal(ContextModel):
+    """Semantic/localization proposal; runtime owns run/frame/generation metadata."""
+
+    id: UUID
+    label: str = Field(min_length=1, max_length=256)
+    kind: str = Field(min_length=1, max_length=256)
+    state: Literal["enabled", "disabled", "unknown"] = "unknown"
+    bounding_box: BoundingBox | None = None
+    view_id: UUID
+
+
 class UIInterpretation(ContextModel):
     reset_suspected: bool = False
     view_id: UUID | None = None
@@ -65,7 +76,7 @@ class UIInterpretation(ContextModel):
     loading: bool = False
     visible_error: str | None = Field(default=None, max_length=2048)
     focused_control_id: UUID | None = None
-    visible_controls: tuple[VisibleControl, ...] = Field(default=(), max_length=80)
+    visible_controls: tuple[UIControlProposal, ...] = Field(default=(), max_length=80)
 
 
 class CoordinatorTurn(ContextModel):
@@ -92,12 +103,22 @@ class OperatorTurn(ContextModel):
     questions: tuple[AdviceQuestion, ...] = Field(default=(), max_length=4)
 
 
+class CriterionCheck(ContextModel):
+    criterion_id: UUID
+    verified_facts: tuple[str, ...] = Field(min_length=1, max_length=20)
+
+
 class VerifierTurn(ContextModel):
     report: VisualVerification
+    ambiguity_kind: Literal["identity", "ui", "evidence"] | None = None
     patch: VerifierPatch | None = None
     satisfied_criterion_ids: tuple[UUID, ...] = Field(default=(), max_length=12)
     operation_resolution: Literal["applied", "not_applied"] | None = None
     observed_effect: str | None = Field(default=None, max_length=2048)
+    effect_status: Literal["verified", "incomplete", "unverifiable"] | None = None
+    effect_facts: tuple[str, ...] = Field(default=(), max_length=20)
+    verified_observation_facts: tuple[str, ...] = Field(default=(), max_length=20)
+    criterion_checks: tuple[CriterionCheck, ...] = Field(default=(), max_length=12)
     questions: tuple[AdviceQuestion, ...] = Field(default=(), max_length=4)
 
 

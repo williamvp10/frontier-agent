@@ -24,7 +24,7 @@ class RoleOverride(ProfileContract):
 class ProfileOverrides(ProfileContract):
     coordinator: RoleOverride = Field(default_factory=RoleOverride)
     operator: RoleOverride = Field(default_factory=RoleOverride)
-    verifier: RoleOverride = Field(default_factory=RoleOverride)
+    verifier: RoleOverride = Field(default_factory=lambda: RoleOverride(timeout_seconds=40))
     recovery: RoleOverride = Field(default_factory=RoleOverride)
     analyst: RoleOverride = Field(default_factory=RoleOverride)
 

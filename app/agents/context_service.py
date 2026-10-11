@@ -31,8 +31,9 @@ ErrorCode = Literal[
 class ContextError(Exception):
     """Safe code only; never attach inputs, values, UUIDs or underlying messages."""
 
-    def __init__(self, code: ErrorCode):
+    def __init__(self, code: ErrorCode, diagnostic: str | None = None):
         self.code = code
+        self.diagnostic = diagnostic
         super().__init__(code)
 
 
@@ -107,7 +108,7 @@ def _merge_map(old, new, *, evidence_fields):
 
 
 class ContextService:
-    def __init__(self, *, max_projection_bytes: int = 65536, recent_actions: int = 10):
+    def __init__(self, *, max_projection_bytes: int = 131072, recent_actions: int = 10):
         if (not isinstance(max_projection_bytes, int) or max_projection_bytes <= 0
                 or not isinstance(recent_actions, int) or not 0 <= recent_actions <= 100):
             raise ContextError("invalid_contract")
@@ -130,6 +131,17 @@ class ContextService:
             return self._apply(source, patch, actor_role)
         except PatchRejected:
             raise
+        except ValidationError as exc:
+            # Only fixed validator labels are allowed; never include input values.
+            labels = {"Inactive assignment": "inactive_assignment",
+                      "Expanded assignment": "expanded_assignment",
+                      "Expanded budget": "expanded_budget",
+                      "Multiple active milestones": "multiple_active_milestones",
+                      "Duplicate IDs": "duplicate_ids"}
+            diagnostic = next((labels[str(error.get("ctx", {}).get("error"))]
+                               for error in exc.errors(include_input=False)
+                               if str(error.get("ctx", {}).get("error")) in labels), None)
+            raise PatchRejected("invalid_contract", diagnostic) from None
         except (ValidationError, ValueError, TypeError, ContextError):
             raise PatchRejected("invalid_contract") from None
 

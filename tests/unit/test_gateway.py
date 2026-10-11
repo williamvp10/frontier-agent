@@ -35,6 +35,25 @@ class BlockedTransport(FakeTransport):
         return b"fake", 1280, 800
 
 
+class FailedCaptureTransport(FakeTransport):
+    async def capture(self):
+        raise TimeoutError("PRIVATE_PROVIDER_ERROR_CANARY")
+
+
+async def test_capture_failure_has_static_diagnostic_without_exception_text():
+    gateway = ProcessGateway(uuid4(), 1, utcnow() + timedelta(seconds=30),
+                             transport_factory=FailedCaptureTransport)
+    await gateway.open("wss://synthetic.example", "not-a-real-password")
+    try:
+        with pytest.raises(GatewayError) as error:
+            await gateway.request("observe")
+        assert error.value.diagnostic_code == "capture_timeout"
+        assert "PRIVATE_PROVIDER_ERROR_CANARY" not in str(error.value)
+    finally:
+        evidence = await gateway.close_and_confirm()
+    assert evidence["owner_stopped"] and evidence["transport_closed"]
+
+
 async def test_gateway_serialized_and_closed_before_reuse():
     gateway = ProcessGateway(
         uuid4(), 1, utcnow() + timedelta(seconds=30), transport_factory=FakeTransport
@@ -70,3 +89,33 @@ async def test_parent_close_kills_unresponsive_owner():
     assert evidence["owner_stopped"]
     result = await asyncio.gather(pending, return_exceptions=True)
     assert isinstance(result[0], Exception)
+
+
+class OneBadFrameTransport(FakeTransport):
+    def __init__(self, *args):
+        self.captures = 0
+        self.actions = 0
+
+    async def action(self, args):
+        self.actions += 1
+
+    async def capture(self):
+        self.captures += 1
+        if self.captures == 1:
+            raise ValueError("PRIVATE_FRAME_CANARY")
+        return f"fresh-after-reconnect:{self.actions}".encode(), 1280, 800
+
+
+async def test_capture_protocol_reconnect_returns_new_evidence_without_replaying_action():
+    gateway = ProcessGateway(uuid4(), 1, utcnow() + timedelta(seconds=40),
+                             transport_factory=OneBadFrameTransport)
+    await gateway.open("wss://synthetic.example", "not-a-real-password")
+    try:
+        await gateway.request("execute", args={"kind": "click", "x": 5, "y": 5, "hold_ms": 180})
+        result = await gateway.request("observe")
+        assert result["capture_reconnected"] is True
+        assert result["image"] == b"fresh-after-reconnect:1"
+        assert (await gateway.request("observe"))["capture_reconnected"] is False
+    finally:
+        evidence = await gateway.close_and_confirm()
+    assert evidence["owner_stopped"] and evidence["transport_closed"]

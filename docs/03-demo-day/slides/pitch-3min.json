@@ -1,0 +1,55 @@
+{
+  "version": "base-0.3",
+  "total_seconds": 180,
+  "status": "En desarrollo; demo y conclusiones pendientes",
+  "slides": [
+    {
+      "title": "El problema · Frontier Agent",
+      "seconds": 30,
+      "headline": "Una tarea simple puede exigir\nmuchas pantallas.",
+      "body": "Buscar un cliente. Actualizar un dato. Exportar un reporte.\n\nSin API, una persona debe recorrer la interfaz.",
+      "aside": "Usuario inicial propuesto: equipos de operación comercial.",
+      "notes": "0:00–0:30. Somos [equipo], y estamos construyendo Frontier Agent para delegar tareas en aplicaciones nuevas. Pensemos en alguien que debe buscar un cliente, actualizar un dato o exportar un reporte. Cuando no hay API, una persona tiene que recorrer la interfaz, reconocer controles y comprobar el resultado. Si la pantalla cambia, debe encontrar el recorrido otra vez. Público inicial propuesto, no cliente validado. Fuentes: README.md, docs/requisitos-reto-1.md. Esta es la hipótesis de problema del proyecto."
+    },
+    {
+      "title": "El impacto · tiempo y herramientas",
+      "seconds": 25,
+      "stats": [
+        {
+          "value": "60%",
+          "label": "del tiempo de los representantes\nde ventas se dedica a actividades\ndistintas de vender."
+        },
+        {
+          "value": "42%",
+          "label": "de los representantes de ventas\nse siente abrumado por la\ncantidad de herramientas."
+        }
+      ],
+      "aside": "Contexto del problema; no equivale a tiempo recuperable.",
+      "notes": "0:30–0:55. Salesforce reporta que los representantes de ventas dedican el 60% del tiempo a actividades distintas de vender, y el 42% se siente abrumado por la cantidad de herramientas. Estos datos muestran una fricción real en ese segmento. No todo ese tiempo es automatizable ni hemos medido cuánto ahorra nuestro agente. Fuente: Salesforce, State of Sales 7.ª edición, 2026, páginas 8 y 16; metodología página 3. Encuesta anónima a 4.050 profesionales de ventas en 22 países, agosto–septiembre de 2025; las cifras se refieren a representantes de ventas y el total es la muestra del informe, no el N exacto de cada pregunta. https://www.salesforce.com/en/wp-content/uploads/sites/4/documents/reports/sales/salesforce-state-of-sales-report-2026.pdf"
+    },
+    {
+      "title": "La solución · Frontier Agent",
+      "seconds": 40,
+      "headline": "Tú defines la tarea.\nEl agente decide cómo resolverla.",
+      "body": "Observa  →  Decide  →  Actúa  →  Verifica",
+      "aside": "Diseñado para adaptar el recorrido a una app nueva, sin API.",
+      "notes": "0:55–1:35. Nuestra solución es Frontier Agent: recibe una instrucción, observa la pantalla y decide el siguiente paso. Usa teclado y ratón para actuar y vuelve a mirar para comprobar el efecto. Si encuentra un bloqueo, ajusta el plan; si la identidad es ambigua, se detiene antes de modificar. La meta es resolver distintas tareas permitidas en una app nueva sin programar cada clic. La adaptación general sigue pendiente de validación. El grafo coordina operador, verificador y recovery; un gateway único ejecuta, con controles de alcance y plazo. Fuente: docs/02-ejecucion/integracion-openrouter-v2.md y app/agents/graph_v2.py."
+    },
+    {
+      "title": "La demo · del objetivo al resultado",
+      "seconds": 60,
+      "headline": "Una instrucción.\nUna app nueva.",
+      "body": "01   [Tarea validada y pantalla inicial]\n02   [Decisión y acción visibles]\n03   [Resultado y chequeo externo]",
+      "aside": "Ejecución real por incorporar al cierre del reto.",
+      "notes": "1:35–2:35. Distribución: 10 s instrucción y estado inicial; 35 s recorrido; 15 s evidencia final y chequeo externo. Introducir una tarea real validada. Mostrar qué control reconoce, qué acción decide y cómo verifica el efecto. Si hay variación de interfaz real, mostrar la decisión que cambia; si no, no afirmar adaptación demostrada. Usar un clip real sanitizado si el recorrido excede el bloque e identificarlo como grabación, declarando duración real. No ocultar fallos. No exponer pantallas privadas sin revisión. Fuente: docs/02-ejecucion/evaluaciones.md."
+    },
+    {
+      "title": "La evidencia y el siguiente paso",
+      "seconds": 25,
+      "headline": "Delegar el recorrido.\nComprobar el resultado.",
+      "body": "[Resultado real / N ejecuciones / duración]\n[Fallo observado y límite que permanece]",
+      "aside": "Al terminar: capacidad demostrada y siguiente mejora.",
+      "notes": "2:35–3:00. En [N ejecuciones] obtuvimos [resultado], en [tiempo]. El límite observado fue [fallo]; priorizamos [mejora]. Nuestra meta es que el usuario exprese la tarea y el agente encuentre el recorrido. Completar métricas y conclusión al terminar el reto. Hoy hay antecedentes de integración y consulta real sólo lectura; no acreditan E1–E5 ni ahorro de tiempo. Fuente: docs/02-ejecucion/integracion-openrouter-v2.md. La estructura usa principios de claridad, narrativa y simplicidad de https://www.ycombinator.com/blog/guide-to-demo-day-pitches y https://www.ycombinator.com/blog/how-to-design-a-better-pitch-deck, adaptados al jurado del reto."
+    }
+  ]
+}

@@ -50,6 +50,7 @@ class DesktopSessionAdapter:
         if not await self.sessions.validate(self.session_id, self.epoch):
             raise ActionRejected("Session revoked")
         frame = await self.gateway.request("observe")
+        self.reconnected_on_last_observation = frame.get("capture_reconnected", False)
         self.deadline.require()
         artifact_id = uuid4()
         self.artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -107,8 +108,16 @@ class DesktopSessionAdapter:
             raise ActionRejected("Mutation lacks current verification")
         self._authorized.add(proposal.id)
 
+    async def confirm_effect(self, action_id: UUID, observation_id: UUID):
+        """Persist independently verified effects; this never sends desktop input."""
+        if (action_id not in self._attempted or self.latest is None
+                or observation_id != self.latest.id
+                or not await self.sessions.validate(self.session_id, self.epoch)):
+            raise ActionRejected("Foreign or stale effect evidence")
+        await self.evidence.mark_action_verified(action_id, self.run_id, observation_id)
+
     def _validate(self, proposal: ActionProposal):
-        self.deadline.require(3)
+        self.deadline.require(3 + 2 * len(getattr(proposal.args, "text_targets", ())))
         if proposal.kind == "replace_text" and proposal.risk == "navigation":
             raise ActionRejected("Text replacement cannot be navigation")
         if (
@@ -123,9 +132,12 @@ class DesktopSessionAdapter:
             or proposal.id in self._attempted
         ):
             raise ActionRejected("Stale, duplicate or foreign proposal")
-        if proposal.kind in {"click", "double_click"}:
+        if getattr(proposal.args, "x", None) is not None:
             if proposal.args.x >= self.latest.width or proposal.args.y >= self.latest.height:
                 raise ActionRejected("Coordinates outside framebuffer")
+        if any(t.x >= self.latest.width or t.y >= self.latest.height
+               for t in getattr(proposal.args, "text_targets", ())):
+            raise ActionRejected("Coordinates outside framebuffer")
 
     @observed("execute-vnc", as_type="tool", counter="action_attempts")
     async def execute(self, proposal: ActionProposal):

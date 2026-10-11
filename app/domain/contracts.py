@@ -98,9 +98,28 @@ class KeyArgs(Contract):
     keys: tuple[str, ...] = Field(min_length=1, max_length=4)
 
 
+class TextTarget(Contract):
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    text: str = Field(repr=False, max_length=4096)
+
+
 class TextArgs(Contract):
     kind: Literal["replace_text"] = "replace_text"
     text: str = Field(repr=False, max_length=4096)
+    x: int | None = Field(default=None, ge=0)
+    y: int | None = Field(default=None, ge=0)
+    text_targets: tuple[TextTarget, ...] = Field(default=(), max_length=8)
+
+    @model_validator(mode="after")
+    def target_pair(self):
+        if (self.x is None) != (self.y is None):
+            raise ValueError("Text target requires both coordinates")
+        if self.text_targets and (self.text or self.x is not None):
+            raise ValueError("Use either one text input or a text target group")
+        if len({(t.x, t.y) for t in self.text_targets}) != len(self.text_targets):
+            raise ValueError("Duplicate text target")
+        return self
 
 
 class ScrollArgs(Contract):

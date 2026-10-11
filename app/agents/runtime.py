@@ -30,6 +30,7 @@ class AgentRuntime:
     max_actions: int = 60
     max_recoveries: int = 2
     model_timeout_s: float = 20
+    proposal_ttl_s: float = 30
     now: object = utcnow
     graph_version: str = "v1"
     task_deadline_at: datetime | None = None

@@ -28,7 +28,8 @@ ENUMS = {
         "observation_failed", "planning_failed", "operator_failed", "verification_failed",
         "recovery_failed", "authorization_failed", "context_rejected", "advice_failed",
         "missing_answer", "scope_violation", "private_context", "stale_observation",
-        "checkpoint_requires_reconciliation", "foreign_context", "graph_version", "other"},
+        "checkpoint_requires_reconciliation", "foreign_context", "graph_version",
+        "invalid_reconciliation", "invalid_verification_mode", "invalid_provenance", "other"},
 }
 NUMBERS = {
     "duration_seconds", "queue_wait_seconds", "task_duration_seconds", "run_duration_seconds",

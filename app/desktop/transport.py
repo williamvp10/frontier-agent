@@ -13,7 +13,11 @@ from websockets.asyncio.client import connect
 
 
 class VNCTransport:
-    def __init__(self, url: str, password: str, allow_private: bool = False, tls_context=None):
+    def __init__(self, url: str, password: str, allow_private: bool = False, tls_context=None,
+                 text_input: str = "keys"):
+        if text_input not in {"keys", "clipboard_utf8", "clipboard_latin1"}:
+            raise ValueError("Unsupported text input mode")
+        self.text_input = text_input
         self._url, self._password = url, password
         self._allow_private = allow_private
         self._tls_context = tls_context
@@ -139,13 +143,47 @@ class VNCTransport:
                 await asyncio.sleep(0.15)
             await self._client.drain()
         elif kind == "replace_text":
-            self._validate_keys(args["text"])
-            with self._client.keyboard.hold("Ctrl", "a"):
+            targets = args.get("text_targets") or [args]
+            if len(targets) > 8 or (args.get("text_targets") and (args.get("text") or args.get("x") is not None)):
+                raise ValueError("Invalid text target group")
+            prepared = []
+            for target in targets:
+                if (target.get("x") is None) != (target.get("y") is None):
+                    raise ValueError("Text target requires both coordinates")
+                if target.get("x") is not None and not (
+                    0 <= target["x"] < self._client.video.width and 0 <= target["y"] < self._client.video.height
+                ):
+                    raise ValueError("Coordinates outside framebuffer")
+                data = None
+                if self.text_input == "keys":
+                    self._validate_keys(target["text"])
+                else:
+                    data = target["text"].encode("utf-8" if self.text_input == "clipboard_utf8" else "latin-1")
+                prepared.append((target, data))
+            for args, data in prepared:
+                if args.get("x") is not None:
+                    self._client.mouse.move(args["x"], args["y"])
+                    with self._client.mouse.hold():
+                        await self._client.drain()
+                        await asyncio.sleep(0.18)
+                    await self._client.drain()
+                    await asyncio.sleep(0.3)
+                if data is not None:
+                    self._client.clipboard.writer.write(
+                        b"\x06\x00\x00\x00" + len(data).to_bytes(4, "big") + data)
+                    await self._client.drain()
+                    await asyncio.sleep(0.3)
+                with self._client.keyboard.hold("Ctrl", "a"):
+                    await self._client.drain()
+                    await asyncio.sleep(0.15)
                 await self._client.drain()
-                await asyncio.sleep(0.15)
-            await self._client.drain()
-            self._client.keyboard.write(args["text"])
-            await self._client.drain()
+                if data is None:
+                    self._client.keyboard.write(args["text"])
+                else:
+                    with self._client.keyboard.hold("Ctrl", "v"):
+                        await self._client.drain()
+                        await asyncio.sleep(0.15)
+                await self._client.drain()
         elif kind == "scroll":
             for _ in range(args["amount"]):
                 with self._client.mouse.hold(3 if args["direction"] == "up" else 4):

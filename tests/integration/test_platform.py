@@ -32,6 +32,26 @@ async def accept(repository, *, now=None, url="wss://desktop.example/custom/path
     )
 
 
+async def test_default_deadlines_reserve_ten_seconds_for_closure(platform_db, repository):
+    received_at = utcnow()
+    task_id = await accept(repository, now=received_at)
+    async with platform_db[1]() as db:
+        task = await db.get(Task, task_id)
+        assert task.action_cutoff_at == received_at + timedelta(seconds=290)
+        assert task.close_target_at == received_at + timedelta(seconds=295)
+        assert task.deadline_at == received_at + timedelta(seconds=300)
+
+
+@pytest.mark.parametrize("elapsed_seconds", [289, 290])
+async def test_queue_claim_respects_new_stop_boundary(repository, elapsed_seconds):
+    received_at = utcnow()
+    task_id = await accept(repository, now=received_at)
+    claim = await repository.claim(
+        task_id, "worker", now=received_at + timedelta(seconds=elapsed_seconds)
+    )
+    assert (claim is None) == (elapsed_seconds == 290)
+
+
 async def test_d01_all_application_tables_and_migration_preserves_data(platform_db, repository):
     task_id = await accept(repository)
     async with platform_db[1]() as db:
@@ -160,7 +180,7 @@ async def test_d06_finalize_requires_confirmed_closure_and_terminal_immutable(
 
 
 async def test_expired_queue_never_creates_run(platform_db, repository):
-    task_id = await accept(repository, now=utcnow() - timedelta(seconds=271))
+    task_id = await accept(repository, now=utcnow() - timedelta(seconds=repository.cutoff_seconds + 1))
     assert await repository.claim(task_id, "worker") is None
     assert (await repository.get_for_team(task_id, "test"))["estado"] == "fallida"
     async with platform_db[1]() as db:
@@ -346,6 +366,45 @@ async def test_intent_duplicate_stale_observation_and_deadline(platform_db, repo
     assert not await evidence.record_intent(proposal(second))
     async with platform_db[1]() as db:
         assert await db.scalar(select(func.count()).select_from(ActionAttempt)) == 1
+
+
+async def test_verified_action_requires_later_evidence_from_same_run(platform_db, repository):
+    from app.domain.contracts import ActionProposal, ClickArgs, Observation
+    from app.persistence.models import ActionAttempt
+    from app.persistence.repositories import EvidenceRepository
+
+    claim = await repository.claim(await accept(repository), "worker")
+    authority = SessionRepository(platform_db[1])
+    session = await authority.reserve(claim.run_id, "owner")
+    await authority.mark_connected(session.id, session.epoch)
+    evidence = EvidenceRepository(platform_db[1])
+
+    async def observe(revision):
+        obs = Observation(run_id=claim.run_id, session_id=session.id, epoch=session.epoch,
+            frame_revision=revision, captured_at=utcnow(), width=800, height=600,
+            artifact_id=uuid4(), sha256="a" * 64)
+        await evidence.save_observation(obs, "synthetic/" + str(obs.artifact_id), 10,
+                                        utcnow() + timedelta(hours=1))
+        return obs
+
+    before = await observe(0)
+    proposal = ActionProposal(run_id=claim.run_id, session_id=session.id, epoch=session.epoch,
+        observation_id=before.id, args=ClickArgs(x=10, y=10), risk="navigation",
+        expected_effect="Open table", scope_reason="Inspect query records",
+        expires_at=utcnow() + timedelta(seconds=10))
+    assert await evidence.record_intent(proposal)
+    await evidence.mark_action_sent(proposal.id)
+    with pytest.raises(ValueError):
+        await evidence.mark_action_verified(proposal.id, claim.run_id, before.id)
+    after = await observe(1)
+    with pytest.raises(ValueError):
+        await evidence.mark_action_verified(proposal.id, uuid4(), after.id)
+    await evidence.mark_action_verified(proposal.id, claim.run_id, after.id)
+    await evidence.mark_action_verified(proposal.id, claim.run_id, after.id)
+    async with platform_db[1]() as db:
+        action = await db.get(ActionAttempt, proposal.id)
+        assert action.status == "verified" and action.verified_at is not None
+        assert action.outcome_observation_id == after.id
 
 
 async def test_cross_run_artifact_rejected(platform_db, repository):
@@ -587,7 +646,7 @@ async def test_two_distinct_proposals_race_one_observation_one_intent(platform_d
 
 
 async def test_queue_reaper_and_claim_race_safe_without_runs(platform_db, repository):
-    task_id = await accept(repository, now=utcnow() - timedelta(seconds=271))
+    task_id = await accept(repository, now=utcnow() - timedelta(seconds=repository.cutoff_seconds + 1))
     await asyncio.gather(repository.expire_queued(), repository.claim(task_id, "worker"))
     assert (await repository.get_for_team(task_id, "test"))["estado"] == "fallida"
     assert await repository.expire_queued() == 0

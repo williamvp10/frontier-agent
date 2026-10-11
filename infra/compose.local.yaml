@@ -1,0 +1,17 @@
+# Local HTTPS overlay; certificates/config are generated in ignored .private/.
+# Use with infra/compose.yaml and project frontier-agent-local.
+services:
+  frontier-agent-api:
+    user: '${LOCAL_UID:-1000}:${LOCAL_GID:-1000}'
+    command: [python, -m, uvicorn, 'app.api.main:app', --host, '0.0.0.0', --port, '8000', --no-access-log, --ssl-keyfile, /run/frontier-tls/server.key, --ssl-certfile, /run/frontier-tls/server.pem]
+    ports: ['127.0.0.1:${LOCAL_API_PORT:-18443}:8000']
+    volumes:
+      - type: bind
+        source: ${LOCAL_TLS_DIR:?Prepare local TLS directory}
+        target: /run/frontier-tls
+        read_only: true
+    healthcheck:
+      test: [CMD, python, -c, 'import os,ssl,urllib.request; r=urllib.request.Request("https://127.0.0.1:8000/health",headers={"Authorization":"Bearer "+os.environ["TEAM_ENTRYPOINT_TOKEN"]}); urllib.request.urlopen(r,timeout=2,context=ssl.create_default_context(cafile="/run/frontier-tls/ca.pem")).close()']
+networks:
+  ingress:
+    external: false

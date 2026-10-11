@@ -35,6 +35,7 @@ class SyntheticDesktop:
         self.inputs = []
         self.disconnected = asyncio.Event()
         self.authentication_ok = False
+        self.clipboards = []
 
     async def handle(self, ws):
         buffer = bytearray()
@@ -104,6 +105,11 @@ class SyntheticDesktop:
                             *struct.unpack("!HH", payload[1:]),
                         )
                     )
+                elif message_type == 6:  # ClientCutText: exactly three padding bytes
+                    assert await read(3) == b"\x00\x00\x00"
+                    size = struct.unpack("!I", await read(4))[0]
+                    assert size <= 65536
+                    self.clipboards.append(await read(size))
                 else:
                     raise AssertionError(f"Unexpected RFB event: {message_type}")
         except ConnectionClosed:
@@ -201,6 +207,31 @@ async def test_wss_rfb_auth_capture_click_keys_unicode_and_disconnect(tmp_path):
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("mode,text,encoding", [
+    ("clipboard_utf8", "Árbol Ω", "utf-8"),
+    ("clipboard_latin1", "Árbol ñ", "latin-1"),
+])
+async def test_explicit_clipboard_encoding_preserves_text_without_character_key_events(tmp_path, mode, text, encoding):
+    async with desktop_server(tmp_path) as (desktop, url, client_tls):
+        transport = VNCTransport(url, desktop.password, allow_private=True,
+                                 tls_context=client_tls, text_input=mode)
+        try:
+            await transport.open()
+            await transport.capture()
+            await transport.action({"kind": "replace_text", "text": text, "x": 5, "y": 5})
+            assert any(e[0] == "pointer" for e in desktop.inputs)
+            assert desktop.clipboards == [text.encode(encoding)]
+            keys = [(e[2], e[3]) for e in desktop.inputs if e[0] == "key"]
+            ctrl, a, v = (asyncvnc.key_codes[k] for k in ("Ctrl", "a", "v"))
+            assert keys == [(1, ctrl), (1, a), (0, a), (0, ctrl),
+                            (1, ctrl), (1, v), (0, v), (0, ctrl)]
+            await transport.capture()
+        finally:
+            await transport.close()
+        await asyncio.wait_for(desktop.disconnected.wait(), 2)
+
+
+@pytest.mark.integration
 async def test_default_transport_rejects_private_destination_before_connection(tmp_path):
     async with desktop_server(tmp_path) as (desktop, url, client_tls):
         transport = VNCTransport(url, desktop.password, tls_context=client_tls)
@@ -232,3 +263,23 @@ async def test_wss_default_tls_rejects_untrusted_certificate(tmp_path):
         assert not desktop.authentication_ok
         assert transport._server is None
         assert not transport._writers and not transport._relays
+
+
+@pytest.mark.integration
+async def test_text_group_focuses_each_field_and_never_sends_submit_keys(tmp_path):
+    async with desktop_server(tmp_path) as (desktop, url, client_tls):
+        transport = VNCTransport(url, desktop.password, allow_private=True,
+                                 tls_context=client_tls, text_input="clipboard_utf8")
+        try:
+            await transport.open()
+            await transport.capture()
+            await transport.action({"kind": "replace_text", "text": "", "text_targets": [
+                {"x": 5, "y": 5, "text": "Synthetic A"},
+                {"x": 10, "y": 10, "text": "Synthetic B"}]})
+            assert desktop.clipboards == [b"Synthetic A", b"Synthetic B"]
+            clicks = [(e[3], e[4]) for e in desktop.inputs if e[0] == "pointer" and e[2] == 1]
+            assert clicks == [(5, 5), (10, 10)]
+            assert not any(e[0] == "key" and e[3] == asyncvnc.key_codes["Return"] for e in desktop.inputs)
+        finally:
+            await transport.close()
+        await asyncio.wait_for(desktop.disconnected.wait(), 2)

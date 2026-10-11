@@ -73,11 +73,14 @@ async def setup_run(tmp_path, graph, seconds=30):
             timeline.append("socket_closed")
             return {"transport_closed": True, "owner_stopped": True}
 
+    accepted_at = utcnow()
     claim = SimpleNamespace(
         task_id=uuid4(),
         run_id=uuid4(),
         instruction="Consulta",
-        action_cutoff_at=utcnow() + timedelta(seconds=seconds),
+        accepted_at=accepted_at,
+        action_cutoff_at=accepted_at + timedelta(seconds=seconds),
+        deadline_at=accepted_at + timedelta(seconds=300),
     )
     tasks = Tasks(timeline)
     runner = TaskRunner(
@@ -110,10 +113,32 @@ async def test_deadline_does_not_wait_for_slow_model(tmp_path):
     async def slow(*args, **kwargs):
         await asyncio.sleep(60)
 
-    runner, claim, timeline, tasks = await setup_run(tmp_path, slow, seconds=2.1)
+    runner, claim, timeline, tasks = await setup_run(tmp_path, slow, seconds=0.1)
     result = await asyncio.wait_for(runner.run(claim, "owner"), 2)
     assert result.estado == "fallida" and result.reason_code == "deadline"
     assert timeline[-1] == "terminal" and "socket_closed" in timeline
+
+
+@pytest.mark.parametrize("persisted_cutoff_seconds", [270, 290])
+async def test_stop_budget_includes_queue_wait_and_respects_existing_cutoff(
+    tmp_path, persisted_cutoff_seconds,
+):
+    async def inspect_budget(instruction, run_id, session_id, epoch, runtime, **kwargs):
+        assert runtime.action_cutoff_at == claim.accepted_at + timedelta(
+            seconds=min(persisted_cutoff_seconds, runner.settings.drain_seconds)
+        )
+        assert (runtime.task_deadline_at - runtime.action_cutoff_at).total_seconds() == (
+            300 - min(persisted_cutoff_seconds, runner.settings.drain_seconds)
+        )
+        return await success()
+
+    runner, claim, timeline, tasks = await setup_run(tmp_path, inspect_budget)
+    claim.accepted_at = utcnow() - timedelta(seconds=250)
+    claim.action_cutoff_at = claim.accepted_at + timedelta(seconds=persisted_cutoff_seconds)
+    claim.deadline_at = claim.accepted_at + timedelta(seconds=300)
+    result = await runner.run(claim, "owner")
+    assert result.estado == "terminada"
+    assert timeline.index("socket_closed") < timeline.index("terminal")
 
 
 async def test_graph_failure_still_closes_and_reports_failure(tmp_path):

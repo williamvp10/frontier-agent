@@ -53,8 +53,8 @@ class TaskRepository:
         sessions: async_sessionmaker,
         cipher: CredentialCipher,
         *,
-        cutoff_seconds: float = 270,
-        close_seconds: float = 285,
+        cutoff_seconds: float = 290,
+        close_seconds: float = 295,
         task_seconds: float = 300,
     ):
         self.sessions = sessions
@@ -705,3 +705,28 @@ class EvidenceRepository:
                 .where(ActionAttempt.id == action_id, ActionAttempt.status.in_(["intent", "sent"]))
                 .values(status="uncertain")
             )
+
+    async def mark_action_verified(self, action_id: UUID, run_id: UUID,
+                                   observation_id: UUID) -> None:
+        """Record post-action evidence without conflating send and effect confirmation."""
+        from app.persistence.models import ActionAttempt, ObservationRow
+
+        async with self.sessions.begin() as db:
+            action = await db.scalar(select(ActionAttempt).where(
+                ActionAttempt.id == action_id, ActionAttempt.run_id == run_id).with_for_update())
+            observed = await db.scalar(select(ObservationRow).where(
+                ObservationRow.id == observation_id, ObservationRow.run_id == run_id))
+            before = await db.get(ObservationRow, action.observation_id) if action else None
+            if (action is None or observed is None or before is None
+                    or action.status not in {"sent", "uncertain", "verified"}
+                    or observed.session_id != action.session_id or observed.epoch != action.epoch
+                    or observed.frame_revision <= before.frame_revision
+                    or observed.captured_at <= before.captured_at):
+                raise ValueError("Invalid post-action evidence")
+            if action.status == "verified":
+                if action.outcome_observation_id != observation_id:
+                    raise ValueError("Effect already bound to another observation")
+                return
+            action.status = "verified"
+            action.verified_at = utcnow()
+            action.outcome_observation_id = observation_id

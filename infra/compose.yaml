@@ -103,6 +103,9 @@ services:
     volumes: [frontier_agent_api_connection:/var/lib/frontier/connections/api:ro]
     environment:
       TEAM_ID: ${TEAM_ID:-frontier}
+      TASK_SECONDS: ${TASK_SECONDS:-300}
+      ACTION_CUTOFF_SECONDS: ${ACTION_CUTOFF_SECONDS:-290}
+      CLOSE_TARGET_SECONDS: ${CLOSE_TARGET_SECONDS:-295}
       TEAM_ENTRYPOINT_TOKEN: ${TEAM_ENTRYPOINT_TOKEN:?Set team token}
       FRONTIER_SERVICE_ROLE: api
       DATABASE_URL: ${API_DATABASE_URL:-}
@@ -148,6 +151,10 @@ services:
       - frontier_agent_worker_connection:/var/lib/frontier/connections/worker:ro
     environment:
       FRONTIER_SERVICE_ROLE: worker
+      TASK_SECONDS: ${TASK_SECONDS:-300}
+      ACTION_CUTOFF_SECONDS: ${ACTION_CUTOFF_SECONDS:-290}
+      CLOSE_TARGET_SECONDS: ${CLOSE_TARGET_SECONDS:-295}
+      DRAIN_SECONDS: ${DRAIN_SECONDS:-288}
       DATABASE_URL: ${WORKER_DATABASE_URL:-}
       LANGGRAPH_DATABASE_URI: ${LANGGRAPH_DATABASE_URI:-}
       REDIS_URL: redis://frontier-agent-redis:6379/0
@@ -157,13 +164,15 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?Set OpenRouter key}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       MODEL_NAME: ${MODEL_NAME:-openai/gpt-6.1-sol}
-      MODEL_COORDINATOR: ${MODEL_COORDINATOR:-openai/gpt-6-luna}
+      MODEL_COORDINATOR: ${MODEL_COORDINATOR:-openai/gpt-6.1-sol}
       MODEL_OPERATOR: ${MODEL_OPERATOR:-openai/gpt-6-luna}
       MODEL_VERIFIER: ${MODEL_VERIFIER:-anthropic/claude-sonnet-5.5}
       MODEL_RECOVERY: ${MODEL_RECOVERY:-openai/gpt-6.1-sol}
       MODEL_ANALYST: ${MODEL_ANALYST:-openai/gpt-6-luna}
       MODEL_JEV: ${MODEL_JEV:-typesafe/jev-1.13}
       MODEL_PROFILES: ${MODEL_PROFILES:-null}
+      MAX_MODEL_CALLS: ${MAX_MODEL_CALLS:-120}
+      MAX_RECOVERIES: ${MAX_RECOVERIES:-6}
       GRAPH_VERSION: ${GRAPH_VERSION:-context-v2}
       OPENROUTER_JEV_ENDPOINT: ${OPENROUTER_JEV_ENDPOINT:-/api/alpha/decisions}
       OPENROUTER_PROVIDER_SORT: ${OPENROUTER_PROVIDER_SORT:-latency}

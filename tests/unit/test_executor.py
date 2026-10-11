@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 
 from app.desktop.executor import ActionRejected, ActionUncertain, DesktopSessionAdapter
-from app.domain.contracts import ActionProposal, ClickArgs, Verification, utcnow
+from app.domain.contracts import ActionProposal, ClickArgs, TextArgs, Verification, utcnow
 
 pytestmark = pytest.mark.unit
 
@@ -145,3 +145,13 @@ async def test_historical_images_are_private_run_registered_references_only(tmp_
         await second.evidence_image_bytes(before.id)
     with pytest.raises(ActionRejected):
         await first.evidence_image_bytes(foreign.id)
+
+
+async def test_targeted_text_outside_frame_never_records_intent_or_sends(tmp_path):
+    d, g, e, _, obs = await make(tmp_path)
+    p = proposal(d, obs, risk="edit", args=TextArgs(text="Synthetic", x=1280, y=0))
+    with pytest.raises(ActionRejected):
+        await d.authorize(p, Verification(status="verified", evidence_ids=(obs.id,)))
+    with pytest.raises(ActionRejected):
+        await d.execute(p)
+    assert not e.intents and g.calls == ["observe"]

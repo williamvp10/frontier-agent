@@ -22,6 +22,7 @@ from app.models.jev_advisor import AdviceSession, failed_advice
 from app.models.schemas import ModelAction, VisualVerification
 from app.models.turns import (
     CoordinatorTurn,
+    CriterionCheck,
     OperatorTurn,
     RecoveryTurn,
     UIInterpretation,
@@ -150,6 +151,119 @@ async def test_query_uses_milestone_slice_independent_criteria_and_private_check
     assert checkpoints and any("shared" in item.checkpoint["channel_values"] for item in checkpoints)
     assert "SYNTHETIC_IMAGE_CANARY" not in repr(checkpoints) + repr(recorder.events)
     assert "PRIVATE_TRANSPORT_CANARY" not in repr(checkpoints) + repr(recorder.events)
+
+
+def verified_navigation_effect():
+    return VerifierTurn(report=VisualVerification(status="incomplete", safe_to_execute=True,
+        changes_business_data=False, facts=(), unresolved_identifiers=(), answer=None),
+        effect_status="verified", effect_facts=("The requested table is now visible",),
+        operation_resolution="applied", observed_effect="Destination columns appeared")
+
+
+async def test_verified_navigation_can_continue_without_claiming_task_complete():
+    d, recorder, model, rt = setup([planner(), action(), verify(), verified_navigation_effect(),
+                                  OperatorTurn(disposition="verify"), verify(complete=True)])
+    confirmations = []
+
+    async def confirm_effect(action_id, observation_id):
+        confirmations.append((action_id, observation_id))
+
+    d.confirm_effect = confirm_effect
+    result = await run(d, rt)
+    assert result.estado == "terminada" and len(d.actions) == 1
+    assert confirmations == [(d.actions[0].id, d.frames[-1].id)]
+    assert rt.context_snapshot.action_history[0].outcome == "confirmed"
+    # Opening the table did not satisfy the final criterion; another independent
+    # verification was still needed before publishing a successful answer.
+    assert [role for role, _, _ in model.calls][-2:] == ["operator", "verifier"]
+    assert any(f.assertion == "The requested table is now visible"
+               and f.status == "independently_verified" for f in rt.context_snapshot.facts)
+
+
+async def test_inconsistent_effect_recovers_on_new_frame_without_replaying_action():
+    inconsistent = VerifierTurn(report=VisualVerification(status="incomplete",
+        safe_to_execute=True, changes_business_data=False,
+        facts=("Unverified observation must not become proof",),
+        unresolved_identifiers=(), answer=None), operation_resolution="applied",
+        observed_effect="An apparent change")
+    d, recorder, _, rt = setup([planner(), action(), verify(), inconsistent,
+        RecoveryTurn(strategy="verify", brief_reason="Check the sent effect on new evidence"),
+        verified_navigation_effect(), OperatorTurn(disposition="verify"), verify(complete=True)])
+    result = await run(d, rt)
+    assert result.estado == "terminada" and len(d.actions) == 1
+    assert len(d.frames) == 3 and rt.context_snapshot.action_history[0].outcome == "confirmed"
+    assert not any(f.assertion == "Unverified observation must not become proof"
+                   for f in rt.context_snapshot.facts)
+    assert any(kind == "verification_rejected" for _, kind, _ in recorder.events)
+
+
+async def test_explicit_unverified_effect_is_not_overridden_by_global_verified_report():
+    bad = VerifierTurn(report=VisualVerification(status="verified", safe_to_execute=True,
+        changes_business_data=False, facts=("An unrelated criterion is supported",),
+        unresolved_identifiers=(), answer=None), effect_status="incomplete",
+        operation_resolution="applied", observed_effect="Unsupported effect")
+    d, _, _, rt = setup([planner(), action(), verify(), bad,
+        RecoveryTurn(strategy="abstain", brief_reason="The effect cannot be established")])
+    result = await run(d, rt)
+    assert result.estado == "fallida" and len(d.actions) == 1
+    assert rt.context_snapshot.action_history[0].outcome != "confirmed"
+
+
+async def test_partial_criteria_have_independent_proof_without_completing_the_task():
+    def plan(context):
+        initial = planner()(context).model_dump()
+        second = SuccessCriterion(id=uuid4(), description="All pages inspected")
+        initial["task_contract"]["success_criteria"] += (second.model_dump(),)
+        initial["milestone_plan"][0]["acceptance_criterion_ids"] += (second.id,)
+        return CoordinatorTurn.model_validate(initial)
+
+    def partial(context):
+        cid = context["shared"]["task_contract"]["success_criteria"][0]["id"]
+        return VerifierTurn(report=VisualVerification(status="incomplete", safe_to_execute=True,
+            changes_business_data=False, facts=(), unresolved_identifiers=(), answer=None),
+            satisfied_criterion_ids=(cid,), criterion_checks=(CriterionCheck(criterion_id=cid,
+                verified_facts=("Requested identity is visible; coverage still incomplete",)),))
+
+    def continue_inspection(context):
+        assert len(context["shared"]["progress"]["remaining_criterion_ids"]) == 1
+        return OperatorTurn(disposition="verify")
+
+    d, _, _, rt = setup([plan, OperatorTurn(disposition="verify"), partial,
+                        continue_inspection, verify(complete=True)])
+    result = await run(d, rt)
+    assert result.estado == "terminada" and not d.actions
+    assert len(rt.context_snapshot.progress.satisfied_criteria) == 2
+
+
+async def test_normal_verification_latency_does_not_expire_an_unchanged_proposal():
+    base = utcnow()
+    elapsed = [0]
+
+    def slow_action(context):
+        elapsed[0] += 3
+        return action()
+
+    def slow_approval(context):
+        elapsed[0] += 12
+        return verify()(context)
+
+    d, _, _, rt = setup([planner(), slow_action, slow_approval, verified_navigation_effect(),
+                        OperatorTurn(disposition="verify"), verify(complete=True)])
+    rt.now = lambda: base + timedelta(seconds=elapsed[0])
+    result = await run(d, rt)
+    assert result.estado == "terminada" and len(d.actions) == 1
+    assert d.actions[0].expires_at <= rt.action_cutoff_at
+
+
+async def test_missing_action_arguments_recover_without_sending_desktop_input():
+    bad = action().model_copy(update={"args": ModelAction(kind="click", x=None, y=None,
+        hold_ms=180, keys=None, text=None, direction=None, amount=None)})
+    d, recorder, _, rt = setup([planner(), bad,
+        RecoveryTurn(strategy="verify", brief_reason="Inspect a valid new screenshot"),
+        verify(complete=True)])
+    result = await run(d, rt)
+    assert result.estado == "terminada" and not d.actions
+    assert any(kind == "action_proposal_rejected" for _, kind, _ in recorder.events)
 
 
 async def test_action_requires_verifier_and_effect_is_confirmed_only_after_later_frame():

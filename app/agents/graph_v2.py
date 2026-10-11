@@ -12,6 +12,7 @@ from uuid import uuid4
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langsmith import tracing_context
+from pydantic import ValidationError
 
 from app.agents.advice_context import build_advice_context
 from app.agents.advice_flow import consult_then_decide
@@ -31,15 +32,18 @@ from app.agents.context import (
     Progress,
     RoleCalls,
     SharedTaskContext,
+    VisibleControl,
 )
 from app.agents.context_service import ContextError, ContextService
 from app.agents.runtime import AgentRuntime
 from app.core.observability import count, observed, progress
+from app.desktop.gateway import GatewayError
 from app.domain.contracts import ActionProposal, Observation, TaskResult, Verification
 from app.models.advice import FinalDecision
 from app.models.jev_advisor import AdviceRejected, assert_safe
 from app.models.openrouter_visual import ProviderCallError
 from app.models.profiles import ROLES
+from app.models.schemas import ModelOutputRejected
 from app.models.turns import CoordinatorTurn, OperatorTurn, RecoveryTurn, ReplanTurn, VerifierTurn
 
 GRAPH_VERSION = "context-v2"
@@ -58,6 +62,7 @@ class State(TypedDict, total=False):
     calls_by_role: RoleCalls
     actions: int
     recoveries: int
+    model_retries: int
     proposal: ActionProposal | None
     mode: str
     verification: VerifierTurn
@@ -65,6 +70,7 @@ class State(TypedDict, total=False):
     questions: tuple
     last_decision: FinalDecision | None
     reobserve_generation: bool
+    last_rejection: dict | None
     route: str
     result: TaskResult
 
@@ -90,15 +96,52 @@ def guarded(code):
                 return terminal(state, str(exc))
             except (ContextError, AdviceRejected) as exc:
                 await runtime.context.recorder.append("runtime", "context_failure", {
-                    "stage": code, "context_error": exc.code})
+                    "stage": code, "context_error": exc.code,
+                    "diagnostic": getattr(exc, "diagnostic", None)})
+                if isinstance(exc, ContextError) and "shared" in state and code in {
+                        "planning_failed", "operator_failed", "verification_failed"}:
+                    state.update(route="recovery", proposal=None,
+                                 last_rejection={"stage": code, "reason_code": exc.code})
+                    if getattr(exc, "diagnostic", None):
+                        state["last_rejection"]["diagnostic"] = exc.diagnostic
+                    return state
                 return terminal(state, "context_rejected")
             except ProviderCallError as exc:
                 await runtime.context.recorder.append("runtime", "model_failure", {
                     "reason": code, "http_status": exc.status_code, "category": exc.category,
                     "schema_features": exc.schema_features})
                 return terminal(state, code)
-            except Exception:
+            except (ValidationError, ModelOutputRejected):
+                await runtime.context.recorder.append("runtime", "output_contract_rejected", {
+                    "stage": code, "category": "invalid_structured_output"})
+                if "shared" in state and code in {"operator_failed", "verification_failed"}:
+                    state.update(route="recovery", proposal=None,
+                                 last_rejection={"stage": code, "reason_code": "invalid_structured_output"})
+                    return state
+                return terminal(state, code)
+            except TimeoutError:
+                rt = runtime.context
+                retries = state.get("model_retries", 0)
+                await rt.recorder.append("runtime", "runtime_failure", {
+                    "stage": code, "category": "TimeoutError"})
+                if code in {"planning_failed", "operator_failed", "verification_failed"} and retries < 2 and rt.remaining() > 25:
+                    state.update(model_retries=retries + 1, route="observe", proposal=None,
+                                 last_rejection={"stage": code, "reason_code": "model_timeout"})
+                    if code == "planning_failed":
+                        state["mode"] = "replan"
+                    elif state.get("mode") == "pre_action":
+                        state["mode"] = "navigation"
+                    await rt.recorder.append("runtime", "model_retry", {"stage": code, "attempt": retries + 1})
+                    return state
+                return terminal(state, code)
+            except Exception as exc:
                 # Never checkpoint exception text, output payload or provider response.
+                category = type(exc).__name__ if type(exc).__name__ in {
+                    "ValueError", "TypeError", "KeyError", "AttributeError", "ActionRejected",
+                    "TimeoutError"} else "runtime_error"
+                await runtime.context.recorder.append("runtime", "runtime_failure", {
+                    "stage": code, "category": category,
+                    "transport_code": exc.diagnostic_code if isinstance(exc, GatewayError) else None})
                 return terminal(state, code)
         node.__name__ = func.__name__
         return node
@@ -184,8 +227,14 @@ async def delegate(state, rt, role, schema, *, extra=None, refresh=True, before_
                    "session_id": str(state["session_id"]), "epoch": state["epoch"],
                    "observation": obs.model_dump(mode="json"), "budgets": budgets(state, rt).model_dump(mode="json")}
     context.update(graph_version=GRAPH_VERSION, mode=state.get("mode"),
+                   last_rejection=state.get("last_rejection"),
                    capabilities={"advice": bool(rt.advice_session and rt.advice_session.advisor)},
                    screen={"width": obs.width, "height": obs.height}, **(extra or {}))
+    if role in {"operator", "recovery"} and (state.get("last_rejection") or {}).get("stage") in {"completion", "verification"}:
+        feedback = state.get("verification")
+        if feedback:
+            context["verification_feedback"] = {"status": feedback.report.status,
+                                                "missing_evidence": feedback.report.facts}
     if before_observation_id and hasattr(rt.desktop, "evidence_image_bytes"):
         context["image_evidence_ids"] = [str(before_observation_id), str(obs.id)]
     else:
@@ -221,10 +270,56 @@ async def accept_memory(state, rt, memory, role):
         await apply(state, rt, ContextPatch.model_validate(data), role=role)
 
 
+class UIRejected(ValueError):
+    """Static diagnostic only; no control label, business value or private payload."""
+
+
+def grounded_ui(source, proposal, observation):
+    """Attach runtime provenance to controls inferred from THIS invocation's image.
+
+    MemoryPatch freshness is validated separately; this never rebases an old patch.
+    """
+    known_views = {view.id for view in source.app_map.views}
+    if (source.current_ui.observation_id, source.run_id, source.session_id, source.epoch) != (
+        observation.id, observation.run_id, observation.session_id, observation.epoch
+    ):
+        raise UIRejected("stale_ui_frame")
+    if proposal.view_id is not None and proposal.view_id not in known_views:
+        raise UIRejected("unknown_ui_view")
+    control_ids = [control.id for control in proposal.visible_controls]
+    if len(control_ids) != len(set(control_ids)):
+        raise UIRejected("duplicate_control_id")
+    if proposal.focused_control_id is not None and proposal.focused_control_id not in control_ids:
+        raise UIRejected("unknown_focus_control")
+    controls = []
+    for control in proposal.visible_controls:
+        if control.view_id not in known_views:
+            raise UIRejected("unknown_control_view")
+        box = control.bounding_box
+        if box and (box.x + box.width > observation.width or box.y + box.height > observation.height):
+            raise UIRejected("control_outside_frame")
+        controls.append(VisibleControl(**control.model_dump(), run_id=source.run_id,
+            observation_id=source.current_ui.observation_id, ui_generation=source.ui_generation))
+    details = proposal.model_dump(exclude={"reset_suspected", "visible_controls"})
+    # Empty nullable descriptions mean unknown/absent, not an evidenced empty
+    # literal. Keep non-empty UI labels unchanged; task/business identity is untouched.
+    for name in ("title", "expanded_menu", "active_tab", "modal", "visible_error"):
+        if isinstance(details[name], str) and not details[name].strip():
+            details[name] = None
+    try:
+        return CurrentUI.model_validate({**source.current_ui.model_dump(), **details,
+                                         "visible_controls": tuple(controls)})
+    except ValidationError:
+        raise UIRejected("invalid_ui_fields") from None
+
+
 @guarded("observation_failed")
 async def observe(state, rt):
     require_budget(state, rt)
     obs = await rt.desktop.observe()
+    if getattr(rt.desktop, "reconnected_on_last_observation", False):
+        await rt.recorder.append("runtime", "capture_reconnected", {
+            "observation_id": str(obs.id), "reason_code": "capture_protocol_error"})
     if (obs.run_id, obs.session_id, obs.epoch) != (state["run_id"], state["session_id"], state["epoch"]):
         raise StopRun("stale_observation")
     if "shared" in state:
@@ -246,6 +341,12 @@ async def observe(state, rt):
         state.update(route="verifier", mode="reconcile")
     elif state.get("mode") == "effect":
         state["route"] = "verifier"
+    elif state.get("mode") == "replan":
+        state["route"] = "coordinator"
+    elif state.get("mode") == "completion" and not state["shared"].progress.remaining_criterion_ids:
+        state["route"] = "verifier"
+    elif state["shared"].active_assignment is None and state["shared"].progress.remaining_criterion_ids:
+        state["route"] = "coordinator"
     else:
         state["route"] = "operator"
     return state
@@ -270,6 +371,12 @@ async def coordinator(state, rt):
             rt.context_snapshot = source
             state["shared"] = source
     assignment = output.active_assignment
+    await rt.recorder.append("coordinator", "plan_shape", {
+        "initial": initial, "milestones": len(output.milestone_plan),
+        "active": sum(m.status == "active" for m in output.milestone_plan),
+        "completed": sum(m.status == "completed" for m in output.milestone_plan),
+        "assignment_status": next((m.status for m in output.milestone_plan
+                                   if assignment and m.id == assignment.milestone_id), None)})
     if assignment:
         available = state["shared"].budgets
         # Inference consumes time after the input snapshot. Clamp proposed quotas
@@ -287,8 +394,16 @@ async def coordinator(state, rt):
         state.update(route="consult", requester_role="coordinator", questions=output.questions)
     else:
         if state["shared"].active_assignment is None:
+            if not state["shared"].progress.remaining_criterion_ids and not state["shared"].pending_operation:
+                state.update(route="verifier", mode="completion", proposal=None)
+                return state
             raise StopRun("missing_assignment")
-        state["route"] = "operator"
+        # Planning can consume most of the 10s freshness window. Capture a new
+        # frame before the operator rather than spending its first call on stale pixels.
+        if (rt.now() - state["observation"].captured_at).total_seconds() > 1:
+            state.update(route="observe", mode="navigation")
+        else:
+            state["route"] = "operator"
     return state
 
 
@@ -297,14 +412,25 @@ async def operator(state, rt):
     turn = await delegate(state, rt, "operator", OperatorTurn,
                           extra={"last_decision": state["last_decision"].model_dump(mode="json")
                                  if state.get("last_decision") else None})
+    await rt.recorder.append("operator", "decision_shape", {
+        "disposition": turn.disposition, "action_kind": turn.args.kind if turn.args else None,
+        "has_text": bool(turn.args and turn.args.text is not None),
+        "observation_id": str(state["observation"].id)})
     await accept_memory(state, rt, turn.patch, "operator")
     if turn.ui is not None:
         if turn.ui.reset_suspected:
             # Suspicion can invalidate, never authorize: obtain another frame first.
             state.update(route="observe", mode="navigation", proposal=None, reobserve_generation=True)
             return state
-        ui = CurrentUI.model_validate({**state["shared"].current_ui.model_dump(),
-                                      **turn.ui.model_dump(exclude={"reset_suspected"})})
+        try:
+            ui = grounded_ui(state["shared"], turn.ui, state["observation"])
+        except UIRejected as exc:
+            await rt.recorder.append("runtime", "ui_proposal_rejected", {"reason_code": str(exc)})
+            # The accepted snapshot stays intact; recovery gets new evidence and
+            # the normal bounded recovery budget. No action from this turn is sent.
+            state.update(route="recovery", proposal=None,
+                         last_rejection={"stage": "ui", "reason_code": str(exc)})
+            return state
         await apply(state, rt, envelope(state["shared"], current_ui=ui), role="runtime")
     state["last_decision"] = None
     if turn.disposition == "consult_jev":
@@ -325,7 +451,14 @@ async def operator(state, rt):
             raise StopRun("action_budget")
         if turn.args is None or not turn.expected_effect or not turn.scope_reason:
             raise StopRun("invalid_action")
-        args = turn.args.to_action()
+        try:
+            args = turn.args.to_action()
+        except (ValidationError, ValueError, TypeError):
+            await rt.recorder.append("runtime", "action_proposal_rejected", {
+                "reason_code": "invalid_action_payload", "action_kind": turn.args.kind})
+            state.update(route="recovery", proposal=None,
+                         last_rejection={"stage": "action", "reason_code": "invalid_action_payload"})
+            return state
         assignment = source.active_assignment
         if assignment is None or args.kind not in assignment.allowed_actions:
             raise StopRun("scope_violation")
@@ -333,9 +466,11 @@ async def operator(state, rt):
             raise StopRun("milestone_budget")
         if source.task_contract.intent == "query" and turn.risk in {"commit", "export"}:
             raise StopRun("scope_violation")
-        if hasattr(args, "x") and (args.x >= obs.width or args.y >= obs.height):
+        if getattr(args, "x", None) is not None and (args.x >= obs.width or args.y >= obs.height):
             raise StopRun("invalid_coordinates")
-        expires = min(obs.captured_at + timedelta(seconds=10), rt.action_cutoff_at)
+        if any(t.x >= obs.width or t.y >= obs.height for t in getattr(args, "text_targets", ())):
+            raise StopRun("invalid_coordinates")
+        expires = min(obs.captured_at + timedelta(seconds=rt.proposal_ttl_s), rt.action_cutoff_at)
         if rt.now() >= expires:
             state.update(route="observe", mode="navigation")
         else:
@@ -362,18 +497,31 @@ async def verifier(state, rt):
     state["verification"] = turn
     report = turn.report
     if report.status == "ambiguous":
+        if turn.ambiguity_kind in {"ui", "evidence"} or not report.unresolved_identifiers:
+            state.update(route="recovery", proposal=None,
+                         last_rejection={"stage": "verification", "reason_code": "ambiguous_control"})
+            await rt.recorder.append("verifier", "verification_rejected", {
+                "reason_code": "ambiguous_control", "observation_id": str(state["observation"].id)})
+            return state
         return terminal(state, "ambiguous", "Identidad ambigua: " + "; ".join(report.unresolved_identifiers))
+    effect_assertions = turn.effect_facts if (turn.effect_status == "verified"
+        and relevant_action is not None and state["mode"] in {"effect", "reconcile"}) else ()
+    reconciliation_assertions = effect_assertions if turn.effect_status is not None else (
+        report.facts if report.status == "verified" else ())
+    criterion_assertions = tuple(text for check in turn.criterion_checks for text in check.verified_facts)
+    assertions = tuple(dict.fromkeys((*turn.verified_observation_facts, *effect_assertions, *criterion_assertions,
+        *(report.facts if report.status == "verified" else ()))))
     new_facts = tuple(Fact(id=uuid4(), run_id=state["run_id"], assertion=text, scope="record",
                            status="independently_verified", author="verifier",
                            evidence_ids=(state["observation"].id,), ui_generation=state["shared"].ui_generation)
-                      for text in report.facts) if report.status == "verified" else ()
+                      for text in assertions)
     if new_facts:
         await apply(state, rt, envelope(state["shared"], facts=new_facts), role="verifier")
     if turn.questions:
         state.update(route="consult", requester_role="verifier", questions=turn.questions)
         return state
     if state["mode"] == "pre_action":
-        if turn.satisfied_criterion_ids or turn.operation_resolution:
+        if turn.satisfied_criterion_ids or turn.criterion_checks or turn.operation_resolution:
             raise StopRun("invalid_verification_mode")
         if not proposal or not report.safe_to_execute or report.status != "verified" or not new_facts:
             state.update(route="recovery", proposal=None)
@@ -389,9 +537,16 @@ async def verifier(state, rt):
         state["route"] = "prepare"
         return state
     if turn.operation_resolution:
-        if relevant_action is None or not new_facts or not turn.observed_effect:
-            raise StopRun("invalid_reconciliation")
-        fids, eids = tuple(f.id for f in new_facts), (state["observation"].id,)
+        if relevant_action is None or not reconciliation_assertions or not turn.observed_effect:
+            # Incomplete task evidence is not failed navigation. Never upgrade the
+            # unverified assertions or replay the sent action; recover on a new frame.
+            await rt.recorder.append("verifier", "verification_rejected", {
+                "reason_code": "invalid_reconciliation",
+                "observation_id": str(state["observation"].id)})
+            state.update(route="recovery", proposal=None)
+            return state
+        fids = tuple(f.id for f in new_facts if f.assertion in reconciliation_assertions)
+        eids = (state["observation"].id,)
         changes = {}
         if turn.operation_resolution == "applied":
             confirmed = ActionRecord.model_validate({**relevant_action.model_dump(), "outcome": "confirmed",
@@ -404,19 +559,30 @@ async def verifier(state, rt):
                     outcome=turn.operation_resolution, evidence_ids=eids, verified_fact_ids=fids))
         if changes:
             await apply(state, rt, envelope(state["shared"], **changes), role="verifier")
+        if turn.operation_resolution == "applied" and hasattr(rt.desktop, "confirm_effect"):
+            await rt.desktop.confirm_effect(relevant_action.id, state["observation"].id)
     if state["shared"].pending_operation:
         state.update(route="recovery", proposal=None)
         return state
-    if turn.satisfied_criterion_ids:
-        if report.status != "verified" or not new_facts:
-            raise StopRun("invalid_provenance")
+    checked = {check.criterion_id: check.verified_facts for check in turn.criterion_checks}
+    claimed = set(turn.satisfied_criterion_ids) | set(checked)
+    if claimed:
+        legacy_proof = report.facts if report.status == "verified" else ()
+        if any(not checked.get(cid, legacy_proof) for cid in claimed):
+            await rt.recorder.append("verifier", "verification_rejected", {
+                "reason_code": "invalid_provenance",
+                "observation_id": str(state["observation"].id)})
+            state.update(route="recovery", proposal=None)
+            return state
         source = state["shared"]
         criteria = {c.id for c in source.task_contract.success_criteria}
         satisfied = {c.criterion_id: c for c in source.progress.satisfied_criteria}
-        if not set(turn.satisfied_criterion_ids) <= criteria:
+        if not claimed <= criteria:
             raise StopRun("invalid_criterion")
-        for cid in turn.satisfied_criterion_ids:
-            satisfied[cid] = CriterionProgress(criterion_id=cid, fact_ids=tuple(f.id for f in new_facts),
+        for cid in claimed:
+            proofs = checked.get(cid, legacy_proof)
+            satisfied[cid] = CriterionProgress(criterion_id=cid, fact_ids=tuple(
+                f.id for f in new_facts if f.assertion in proofs),
                                                evidence_ids=(state["observation"].id,))
         await apply(state, rt, envelope(source, progress=Progress(
             satisfied_criteria=tuple(satisfied.values()), remaining_criterion_ids=tuple(
@@ -433,8 +599,27 @@ async def verifier(state, rt):
         state.update(route="finalize_candidate", proposal=None, result=TaskResult(estado="terminada",
             resumen="respuesta: " + report.answer if report.answer else "Tarea completada y verificada.",
             reason_code="verified", evidence_ids=(state["observation"].id,)))
+    elif not source.progress.remaining_criterion_ids and state["mode"] == "completion" and report.status == "incomplete":
+        # Final assessment can contradict premature partial criterion checks.
+        # Reopen conservatively; retain historical proofs, but never force success
+        # or consume failure-recovery budget for an ordinary missing-proof step.
+        await apply(state, rt, envelope(source, progress=Progress(
+            satisfied_criteria=(), remaining_criterion_ids=tuple(c.id for c in source.task_contract.success_criteria),
+            useful_transition_ids=source.progress.useful_transition_ids,
+            no_progress_count=source.progress.no_progress_count)), role="verifier")
+        await rt.recorder.append("verifier", "completion_reopened", {
+            "remaining_criteria": len(state["shared"].progress.remaining_criterion_ids)})
+        state.update(route="operator" if state["shared"].active_assignment else "coordinator",
+                     mode="navigation", proposal=None,
+                     last_rejection={"stage": "completion", "reason_code": "incomplete_task_evidence"})
     elif report.status == "unverifiable":
         state.update(route="recovery", proposal=None)
+    elif not source.progress.remaining_criterion_ids:
+        # Partial checks can satisfy the last criterion while this effect report
+        # remains incomplete. Obtain an explicit final assessment/answer; do not
+        # ask the planner to invent another assignment or elevate the report.
+        state.update(route="recovery" if state["mode"] == "completion" else "verifier",
+                     mode="completion", proposal=None)
     else:
         active = source.active_assignment
         milestone = next((m for m in source.milestone_plan if active and m.id == active.milestone_id), None)
@@ -532,9 +717,14 @@ async def recovery(state, rt):
         if not turn.questions:
             raise StopRun("invalid_advice_context")
         state.update(route="consult", requester_role="recovery", questions=turn.questions)
-    elif state["shared"].pending_operation:
+    elif state["shared"].pending_operation or any(
+            a.outcome in {"sent", "uncertain"} and a.reconciliation is None
+            for a in state["shared"].action_history):
         state.update(route="observe" if turn.strategy == "reobserve" else "verifier", mode="reconcile")
     else:
+        if state["shared"].active_assignment is None and state["shared"].progress.remaining_criterion_ids:
+            state.update(route="coordinator", mode="navigation")
+            return state
         state.update(route={"reobserve": "observe", "verify": "verifier", "replan": "coordinator"}[turn.strategy],
                      mode="completion")
     return state

@@ -3,11 +3,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.contracts import ActionArgs, ClickArgs, KeyArgs, ScrollArgs, TextArgs
+from app.domain.contracts import ActionArgs, ClickArgs, KeyArgs, ScrollArgs, TextArgs, TextTarget
 
 
 class ModelOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ModelOutputRejected(ValueError):
+    """Static adapter diagnostic; never retains raw provider output or parse errors."""
 
 
 class Plan(ModelOutput):
@@ -25,13 +29,21 @@ class ModelAction(ModelOutput):
     hold_ms: int | None
     keys: tuple[str, ...] | None
     text: str | None
+    text_targets: tuple[TextTarget, ...] | None = None
     direction: Literal["up", "down"] | None
     amount: int | None
 
     def to_action(self) -> ActionArgs:
         models = {"click": ClickArgs, "double_click": ClickArgs, "press_key": KeyArgs,
                   "replace_text": TextArgs, "scroll": ScrollArgs}
-        return models[self.kind].model_validate(self.model_dump(exclude_none=True))
+        fields = {"click": {"kind", "x", "y", "hold_ms"},
+                  "double_click": {"kind", "x", "y", "hold_ms"},
+                  "press_key": {"kind", "keys"}, "replace_text": {"kind", "text", "x", "y", "text_targets"},
+                  "scroll": {"kind", "direction", "amount"}}
+        # The flat provider schema has nullable slots for every action kind.
+        # Only the selected kind's fields reach the strict transport contract.
+        return models[self.kind].model_validate(self.model_dump(
+            include=fields[self.kind], exclude_none=True))
 
 
 class OperatorDecision(ModelOutput):

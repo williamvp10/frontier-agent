@@ -22,7 +22,8 @@ class Settings(BaseSettings):
     model_name: str = "openai/gpt-6.1-sol"
     model_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
     model_timeout_seconds: float = Field(default=20, gt=0, le=60)
-    model_coordinator: str = "openai/gpt-6-luna"
+    action_proposal_ttl_seconds: float = Field(default=30, gt=0, le=60)
+    model_coordinator: str = "openai/gpt-6.1-sol"
     model_operator: str = "openai/gpt-6-luna"
     model_verifier: str = "anthropic/claude-sonnet-5.5"
     model_recovery: str = "openai/gpt-6.1-sol"
@@ -39,15 +40,16 @@ class Settings(BaseSettings):
     jev_max_calls: int = Field(default=4, ge=0, le=16)
     artifact_dir: Path = Path(".private/artifacts")
     allow_private_desktops: bool = False
+    vnc_text_input: Literal["keys", "clipboard_utf8", "clipboard_latin1"] = "keys"
     heartbeat_max_age_seconds: float = 10.0
     admission_timeout_seconds: float = 1.5
     task_seconds: float = 300.0
-    action_cutoff_seconds: float = 270.0
-    close_target_seconds: float = 285.0
-    drain_seconds: float = 268.0
+    action_cutoff_seconds: float = 290.0
+    close_target_seconds: float = 295.0
+    drain_seconds: float = 288.0
     max_actions: int = 60
-    max_model_calls: int = 40
-    max_recoveries: int = 2
+    max_model_calls: int = 120
+    max_recoveries: int = 6
     langsmith_tracing: bool = False
     langfuse_enabled: bool = True
     langfuse_public_key: SecretStr = Field(default=SecretStr(""), repr=False)

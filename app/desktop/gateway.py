@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from datetime import datetime
+from functools import partial
 from uuid import UUID
 
 from app.core.observability import observed, update_current
@@ -14,7 +15,13 @@ from app.domain.contracts import utcnow
 
 
 class GatewayError(RuntimeError):
-    pass
+    @property
+    def diagnostic_code(self):
+        code = str(self)
+        return code if code in {"transport_error", "capture_timeout", "capture_eof",
+            "capture_protocol_error", "capture_error", "action_timeout", "action_eof",
+            "action_protocol_error", "action_error", "Gateway response timed out",
+            "Gateway stopped", "Gateway closed", "Action deadline reached"} else "gateway_error"
 
 
 def _gateway_process(pipe, url, password, session_id, epoch, seconds, allow_private, factory):
@@ -30,6 +37,8 @@ def _gateway_process(pipe, url, password, session_id, epoch, seconds, allow_priv
 
     async def serve():
         transport = factory(url, password, allow_private)
+        stage = "connect"
+        capture_reconnects = 0
         try:
             await transport.open()
             pipe.send({"ok": True})
@@ -43,22 +52,42 @@ def _gateway_process(pipe, url, password, session_id, epoch, seconds, allow_priv
                     pipe.send({"ok": False, "code": "stale_session"})
                     continue
                 if command["kind"] == "observe":
-                    image, width, height = await transport.capture()
+                    stage = "capture"
+                    reconnected = False
+                    try:
+                        image, width, height = await transport.capture()
+                    except ValueError:
+                        if capture_reconnects or cutoff - time.monotonic() <= 24:
+                            raise
+                        # Same fenced owner and deadline. Close the old transport
+                        # before reconnecting; only a screenshot is retried, never input.
+                        capture_reconnects += 1
+                        async with asyncio.timeout(10):
+                            await transport.close()
+                            await transport.open()
+                            image, width, height = await transport.capture()
+                        reconnected = True
                     if time.monotonic() >= cutoff:
                         return
-                    pipe.send({"ok": True, "image": image, "width": width, "height": height})
+                    pipe.send({"ok": True, "image": image, "width": width, "height": height,
+                               "capture_reconnected": reconnected})
                 elif command["kind"] == "execute":
+                    stage = "action"
                     # Worst-case allowance covers input release; fail closed near deadline.
-                    if cutoff - time.monotonic() <= 3.0:
+                    if cutoff - time.monotonic() <= 3.0 + 2 * len(command["args"].get("text_targets", ())):
                         pipe.send({"ok": False, "code": "deadline"})
                         continue
                     await transport.action(command["args"])
                     pipe.send({"ok": True})
                 else:
                     pipe.send({"ok": False, "code": "unsupported_command"})
-        except BaseException:
+        except BaseException as exc:
+            suffix = "timeout" if isinstance(exc, TimeoutError) else (
+                "eof" if isinstance(exc, (EOFError, asyncio.IncompleteReadError)) else (
+                    "protocol_error" if isinstance(exc, ValueError) else "error"))
+            code = f"{stage}_{suffix}" if stage in {"capture", "action"} else "transport_error"
             try:
-                pipe.send({"ok": False, "code": "transport_error"})
+                pipe.send({"ok": False, "code": code})
             except (BrokenPipeError, EOFError, OSError):
                 pass
         finally:
@@ -82,7 +111,9 @@ class ProcessGateway:
         self.closed = False
 
     @observed("connect-vnc", as_type="tool", counter="vnc_calls")
-    async def open(self, url: str, password: str, *, allow_private=False):
+    async def open(self, url: str, password: str, *, allow_private=False, text_input="keys"):
+        if text_input not in {"keys", "clipboard_utf8", "clipboard_latin1"}:
+            raise GatewayError("Unsupported text input mode")
         seconds = (self.cutoff_at - utcnow()).total_seconds()
         if seconds <= 3:
             raise GatewayError("No safe execution time remains")
@@ -99,7 +130,7 @@ class ProcessGateway:
                 self.epoch,
                 seconds,
                 allow_private,
-                self._factory,
+                partial(VNCTransport, text_input=text_input) if self._factory is VNCTransport else self._factory,
             ),
             daemon=True,
         )
@@ -135,7 +166,7 @@ class ProcessGateway:
                 self._pipe.send(
                     {"kind": kind, "session_id": self.session_id, "epoch": self.epoch, **fields}
                 )
-                return await self._receive()
+                return await self._receive(22 if kind == "observe" else 12)
             except (BrokenPipeError, EOFError, OSError):
                 raise GatewayError("Gateway stopped") from None
 

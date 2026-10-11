@@ -9,9 +9,10 @@ import math
 import os
 import re
 import signal
+import ssl
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -38,6 +39,7 @@ class PracticeConfig:
     password: str
     desktop_token: str
     team_token: str
+    ca_file: Path | None = None
 
     def validate(self):
         def valid_http(value):
@@ -59,6 +61,19 @@ class PracticeConfig:
                 raise HarnessError("missing_credentials")
         except (ValueError, TypeError):
             raise HarnessError("invalid_config") from None
+
+
+def client_options(config):
+    """Keep public CAs and add an explicit local development CA; never verify=False."""
+    options = {"trust_env": False, "follow_redirects": False}
+    if config.ca_file is not None:
+        try:
+            context = ssl.create_default_context()
+            context.load_verify_locations(cafile=str(config.ca_file))
+        except (OSError, ssl.SSLError):
+            raise HarnessError("invalid_config") from None
+        options["verify"] = context
+    return options
 
 
 def _numeric(value: str):
@@ -466,7 +481,7 @@ async def reconcile(config, guard):
         raise HarnessError("unknown_task_requires_owner_reconciliation")
     task_id = str(UUID(pending["task_id"]))
     # Read-only API reconciliation: never reset, submit, cancel or call __check.
-    async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+    async with httpx.AsyncClient(**client_options(config)) as client:
         harness = PracticeHarness(config, client, exclusive_reserved=True)
         await harness.confirm_service()
         result = await harness._request("GET", "/tasks/" + task_id)
@@ -502,6 +517,7 @@ async def main(args) -> int:
         if args.cases is not None or args.all or not args.exclusive_desktop:
             raise HarnessError("invalid_cli")
         config = load_config(args.env_file, args.entrypoint)
+        config = replace(config, ca_file=args.ca_file)
         config.validate()
         with support.DesktopGuard(config.desktop_ws, config.entrypoint) as guard:
             return await reconcile(config, guard)
@@ -533,7 +549,9 @@ async def main(args) -> int:
     if args.events:
         support.private_path(args.events)
     config = load_config(args.env_file, args.entrypoint)
+    config = replace(config, ca_file=args.ca_file)
     config.validate()
+    options = client_options(config)
     resolver = load_trace_resolver(args.langfuse_env_file)
     suite_id = str(uuid4())
     with support.DesktopGuard(config.desktop_ws, config.entrypoint) as guard:
@@ -556,7 +574,7 @@ async def main(args) -> int:
             writer.append_jsonl(writer.details_path, {"suite_id": suite_id, "case_id": report.case_id,
                 "repetition": report.repetition, "kind": kind, "text": support.private_text(text, secrets)})
 
-        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+        async with httpx.AsyncClient(**options) as client:
             harness = PracticeHarness(config, client, guard=guard, exclusive_reserved=True,
                 on_event=event, on_report=writer.completed, trace_resolver=resolver,
                 desktop_ready_timeout_seconds=args.desktop_ready_timeout,
@@ -622,6 +640,7 @@ def build_parser():
     selection.add_argument("--cases", help="Comma-separated case IDs, in execution order")
     selection.add_argument("--all", action="store_true", help="Explicitly select every fixture")
     parser.add_argument("--entrypoint", help="HTTPS URL; alternatively TEAM_ENTRYPOINT_URL in local config")
+    parser.add_argument("--ca-file", type=Path, help="Additional trusted CA for a local HTTPS API; TLS verification stays enabled")
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env.vnc")
     parser.add_argument("--langfuse-env-file", type=Path, help="Optional local project/base-URL config; no tracing keys needed")
     parser.add_argument("--exclusive-desktop", action="store_true", help="Declare externally coordinated exclusive reservation")

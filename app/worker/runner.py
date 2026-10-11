@@ -86,14 +86,18 @@ class TaskRunner:
                     await asyncio.sleep(0.5)
             credentials = await self.tasks.credentials_for_authority(claim.task_id)
             secrets = (credentials["url"], credentials["password"])
-            # Absolute deadlines include queue wait; drain before hard cutoff.
-            drain_at = claim.action_cutoff_at - timedelta(seconds=2)
+            # Queue wait consumes the same budget; never extend a persisted cutoff.
+            drain_at = min(
+                claim.action_cutoff_at,
+                claim.accepted_at + timedelta(seconds=self.settings.drain_seconds),
+            )
             gateway = self.gateway_factory(session.id, session.epoch, drain_at)
             self.active.add(gateway)
             await gateway.open(
                 credentials["url"],
                 credentials["password"],
                 allow_private=self.settings.allow_private_desktops,
+                text_input=self.settings.vnc_text_input,
             )
             del credentials
             await self.sessions.mark_connected(session.id, session.epoch)
@@ -116,6 +120,7 @@ class TaskRunner:
                 max_actions=self.settings.max_actions,
                 max_recoveries=self.settings.max_recoveries,
                 model_timeout_s=self.settings.model_timeout_seconds,
+                proposal_ttl_s=self.settings.action_proposal_ttl_seconds,
                 graph_version=self.settings.graph_version,
                 task_deadline_at=getattr(claim, "deadline_at", claim.action_cutoff_at),
                 advice_session=AdviceSession(run_id=claim.run_id, action_cutoff_at=drain_at,
