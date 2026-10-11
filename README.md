@@ -391,3 +391,19 @@ Las pruebas automatizadas y la evaluación real del escritorio son validaciones 
 Los casos reales todavía requieren repetir la evaluación tras estos cambios; no se
 presentan como una suite completamente aprobada. Las capturas, trazas y resultados
 permanecen en almacenamiento local ignorado, fuera del repositorio público.
+
+### Clave de respaldo de OpenRouter
+
+Configurar `OPENROUTER_API_KEY_BACKUP` junto con `OPENROUTER_API_KEY` en el entorno
+privado del worker o en Dokploy. Ante un HTTP 402 por créditos o límite de la clave
+principal, se reintenta una vez la misma inferencia con el respaldo, conservando el
+modelo, contexto y plazo original. Todos los roles y Jev comparten la selección del
+worker; las llamadas posteriores usan el respaldo hasta reiniciar el proceso. No se
+repiten acciones del escritorio. Los errores de autenticación, esquema, rate limit
+y presupuesto temporal de solicitudes simultáneas no activan el cambio.
+
+Las claves de una misma cuenta comparten el saldo: si se agota el saldo de la cuenta,
+el respaldo necesita pertenecer a una cuenta con créditos. El cambio se registra sin
+claves; `credential_slot` en los eventos de uso distingue `primary` de `backup`.
+Después de modificar credenciales hay que reiniciar el worker cuando haya terminado
+y cerrado sus sesiones activas.

@@ -5,6 +5,7 @@ from types import MappingProxyType
 import httpx
 
 from app.models.openai_visual import VisualModel
+from app.models.openrouter_keys import OpenRouterKeys
 from app.models.openrouter_visual import OpenRouterVisualModel
 from app.models.profiles import resolve_profiles
 
@@ -51,6 +52,9 @@ def build_visual_model(settings) -> VisualModel:
     if not settings.openrouter_api_key.get_secret_value().strip():
         raise ValueError("Missing OpenRouter model credential")
     profiles = resolve_profiles(settings)
+    keys = OpenRouterKeys(settings.openrouter_api_key, getattr(settings, "openrouter_api_key_backup", None))
     models = {p.role: OpenRouterVisualModel(api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_base_url, profile=p) for p in profiles.profiles}
-    return RoleModelRouter(profiles, models)
+        base_url=settings.openrouter_base_url, profile=p, keys=keys) for p in profiles.profiles}
+    router = RoleModelRouter(profiles, models)
+    router.keys = keys
+    return router

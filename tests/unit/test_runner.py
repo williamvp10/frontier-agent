@@ -162,3 +162,17 @@ async def test_secret_from_model_output_redacted_before_persistence(tmp_path):
     runner, claim, timeline, tasks = await setup_run(tmp_path, leak)
     await runner.run(claim, "owner")
     assert "canary-password" not in tasks.summary and "private.example" not in tasks.summary
+
+
+async def test_terminal_summary_redacts_primary_and_backup_provider_credentials(tmp_path):
+    async def leak(*args, **kwargs):
+        return TaskResult(estado="fallida", resumen="opaque-primary-canary opaque-backup-canary",
+                          reason_code="execution_failed")
+
+    runner, claim, _, tasks = await setup_run(tmp_path, leak)
+    from pydantic import SecretStr
+    runner.settings.openrouter_api_key = SecretStr("opaque-primary-canary")
+    runner.settings.openrouter_api_key_backup = SecretStr("opaque-backup-canary")
+    await runner.run(claim, "owner")
+    assert "opaque-primary-canary" not in tasks.summary
+    assert "opaque-backup-canary" not in tasks.summary

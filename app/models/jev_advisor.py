@@ -24,6 +24,7 @@ from app.models.advice import (
     FinalDecision,
     Text,
 )
+from app.models.openrouter_keys import OpenRouterKeys, is_credit_exhausted
 from app.models.prompts import JEV_CRITERIA
 
 ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
@@ -130,7 +131,8 @@ class Advisor(Protocol):
 class JevAdvisor:
     def __init__(self, *, api_key: SecretStr, model="typesafe/jev-1.13", timeout_seconds=3,
                   client: httpx.AsyncClient | None = None, secrets: tuple[str, ...] = (),
-                  base_url="https://openrouter.ai/api/v1", endpoint="/api/alpha/decisions"):
+                  base_url="https://openrouter.ai/api/v1", endpoint="/api/alpha/decisions",
+                  keys: OpenRouterKeys | None = None):
         if timeout_seconds <= 0 or model != "typesafe/jev-1.13" or (
             base_url.rstrip("/") != "https://openrouter.ai/api/v1"
             or endpoint != "/api/alpha/decisions"
@@ -140,7 +142,9 @@ class JevAdvisor:
         self.endpoint = origin.scheme + "://" + origin.netloc + endpoint
         self._key, self.model, self.timeout_seconds = api_key, model, timeout_seconds
         self._client = client
-        self._secrets = secrets + (api_key.get_secret_value(),)
+        self.keys = keys or OpenRouterKeys(api_key)
+        self._secrets = secrets + tuple(self.keys.key(i).get_secret_value()
+                                       for i in range(2 if self.keys.has_backup else 1))
 
     @observed("generate-jev-advice", as_type="generation", counter="jev_calls")
     async def advise(self, request: AdviceRequest, *, timeout_seconds: float) -> AdviceResult:
@@ -161,17 +165,26 @@ class JevAdvisor:
         try:
             limit = min(self.timeout_seconds, timeout_seconds)
             async with asyncio.timeout(limit):
-                async with client.stream("POST", self.endpoint, json=payload_out,
-                    headers={"Authorization": "Bearer " + self._key.get_secret_value()},
-                    timeout=limit, follow_redirects=False) as response:
-                    if response.status_code != 200:
-                        return failed_advice(request, "unavailable", "provider_unavailable",
-                                             time.monotonic() - start)
-                    data = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        data.extend(chunk)
-                        if len(data) > 65536:
-                            raise AdviceRejected("oversized_response")
+                for attempt in range(2):
+                    slot = self.keys.active
+                    async with client.stream("POST", self.endpoint, json=payload_out,
+                        headers={"Authorization": "Bearer " + self.keys.key(slot).get_secret_value()},
+                        timeout=limit, follow_redirects=False) as response:
+                        if response.status_code not in {200, 402}:
+                            return failed_advice(request, "unavailable", "provider_unavailable",
+                                                 time.monotonic() - start)
+                        data = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            data.extend(chunk)
+                            if len(data) > 65536:
+                                raise AdviceRejected("oversized_response")
+                        if response.status_code == 402:
+                            error = json.loads(data)
+                            if attempt == 0 and is_credit_exhausted(402, error) and self.keys.failover(slot):
+                                continue
+                            return failed_advice(request, "unavailable", "provider_unavailable",
+                                                 time.monotonic() - start)
+                        break
                 payload = json.loads(data)
                 assert_safe(payload, self._secrets)
                 answers = []
@@ -291,10 +304,11 @@ def revalidate_advice(result: AdviceResult, binding: AdviceBinding) -> AdviceRes
     return result
 
 
-def build_jev_advisor(settings) -> JevAdvisor | None:
+def build_jev_advisor(settings, *, keys=None) -> JevAdvisor | None:
     if not settings.jev_enabled:
         return None
     # A missing key is an unavailable optional advisor, not a fake successful answer.
     return JevAdvisor(api_key=settings.openrouter_api_key, model=settings.model_jev,
                       timeout_seconds=settings.jev_timeout_seconds,
-                      base_url=settings.openrouter_base_url, endpoint=settings.openrouter_jev_endpoint)
+                      base_url=settings.openrouter_base_url, endpoint=settings.openrouter_jev_endpoint,
+                      keys=keys or OpenRouterKeys(settings.openrouter_api_key, settings.openrouter_api_key_backup))

@@ -85,7 +85,9 @@ class TaskRunner:
                         raise TimeoutError("Destination unavailable within safe deadline") from None
                     await asyncio.sleep(0.5)
             credentials = await self.tasks.credentials_for_authority(claim.task_id)
-            secrets = (credentials["url"], credentials["password"])
+            secrets = (credentials["url"], credentials["password"],
+                       self.settings.openrouter_api_key.get_secret_value(),
+                       self.settings.openrouter_api_key_backup.get_secret_value())
             # Queue wait consumes the same budget; never extend a persisted cutoff.
             drain_at = min(
                 claim.action_cutoff_at,
@@ -124,10 +126,10 @@ class TaskRunner:
                 graph_version=self.settings.graph_version,
                 task_deadline_at=getattr(claim, "deadline_at", claim.action_cutoff_at),
                 advice_session=AdviceSession(run_id=claim.run_id, action_cutoff_at=drain_at,
-                    advisor=build_jev_advisor(self.settings), max_calls=self.settings.jev_max_calls,
+                    advisor=build_jev_advisor(self.settings, keys=getattr(self.model, "keys", None)), max_calls=self.settings.jev_max_calls,
                     timeout_seconds=self.settings.jev_timeout_seconds,
-                    secrets=secrets + (self.settings.openrouter_api_key.get_secret_value(),)),
-                secrets=secrets + (self.settings.openrouter_api_key.get_secret_value(),),
+                    secrets=secrets),
+                secrets=secrets,
             )
             pending = asyncio.create_task(
                 self.graph_runner(

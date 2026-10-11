@@ -298,3 +298,28 @@ async def test_same_question_cannot_be_reasked_by_another_role_or_cosmetic_versi
         other = req.model_copy(update={"request_id": uuid4(), "scope": newer.scope})
         assert (await ledger.consult(other, binding=newer)).reason_code == "duplicate_question"
         assert ledger.calls == 1
+
+
+async def test_jev_uses_shared_credit_failover_and_does_not_expose_either_key():
+    from app.models.openrouter_keys import OpenRouterKeys
+
+    req, binding = example()
+    calls = []
+    keys = OpenRouterKeys(SecretStr('synthetic-primary-key'), SecretStr('synthetic-backup-key'))
+
+    def respond(request):
+        calls.append(request)
+        if request.headers['Authorization'] == 'Bearer synthetic-primary-key':
+            return httpx.Response(402, json={'error': {'message': 'Insufficient credits'}})
+        return httpx.Response(200, json=response_data())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        advisor = JevAdvisor(api_key=keys.key(0), keys=keys, client=client)
+        result = await session(req, advisor).consult(req, binding=binding)
+        req2 = req.model_copy(update={'request_id': uuid4()})
+        result2 = await advisor.advise(req2, timeout_seconds=3)
+    assert result.status == result2.status == 'ok'
+    assert [c.headers['Authorization'] for c in calls] == [
+        'Bearer synthetic-primary-key', 'Bearer synthetic-backup-key', 'Bearer synthetic-backup-key']
+    assert calls[0].content == calls[1].content
+    assert 'synthetic-backup-key' not in result.model_dump_json()

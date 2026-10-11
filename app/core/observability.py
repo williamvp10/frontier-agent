@@ -19,6 +19,7 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 ROLES = {"coordinator", "orchestrator", "operator", "verifier", "recovery", "analyst"}
 ENUMS = {
+    "credential_slot": {"primary", "backup"},
     "role": ROLES,
     "graph_version": {"v1", "context-v2"},
     "state": {"terminada", "fallida", "unconfirmed"},

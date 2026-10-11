@@ -100,7 +100,7 @@ def prepare(model_env, port):
         if role == "worker":
             local["LANGGRAPH_DATABASE_URI"] = dsn.replace("postgresql+psycopg", "postgresql")
     for key in ("MODEL_COORDINATOR", "MODEL_OPERATOR", "MODEL_VERIFIER", "MODEL_RECOVERY", "MODEL_ANALYST",
-                "MODEL_JEV", "MODEL_PROFILES", "MODEL_REASONING_EFFORT", "MODEL_TIMEOUT_SECONDS"):
+                "MODEL_JEV", "OPENROUTER_API_KEY_BACKUP", "MODEL_PROFILES", "MODEL_REASONING_EFFORT", "MODEL_TIMEOUT_SECONDS"):
         if values.get(key):
             local[key] = values[key]
     data = "\n".join(key + "=" + json.dumps(value) for key, value in local.items()) + "\n"

@@ -74,6 +74,8 @@ class OpenAIVisualModel:
                 not self._credential.get_secret_value() or self._credential.get_secret_value() not in model
             ):
                 meta["resolved_model"] = model
+            if hasattr(self, "keys"):
+                meta["credential_slot"] = self.keys.slot
             self.last_metadata = meta
             record_usage(meta, model=meta.get("resolved_model", getattr(self.client, "model_name", None)))
             result = result["parsed"]
